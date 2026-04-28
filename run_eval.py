@@ -27,6 +27,8 @@ with open(ANNOTATION_PATH, "r", encoding="utf-8") as f:
 # ====== evaluation ======
 results = []
 
+from qwen_vl_utils import process_vision_info
+
 def ask_model(video_path, option_a, option_b):
     prompt = f"""
 Watch the video carefully.
@@ -49,28 +51,51 @@ Answer with only A or B.
         }
     ]
 
-    inputs = processor.apply_chat_template(
+    text = processor.apply_chat_template(
         messages,
-        add_generation_prompt=True,
+        tokenize=False,
+        add_generation_prompt=True
+    )
+
+    image_inputs, video_inputs = process_vision_info(messages)
+
+    inputs = processor(
+        text=[text],
+        images=image_inputs,
+        videos=video_inputs,
+        padding=True,
         return_tensors="pt"
-    ).to(model.device)
+    )
 
-    outputs = model.generate(**inputs, max_new_tokens=10)
-    text = processor.decode(outputs[0], skip_special_tokens=True)
+    inputs = inputs.to(model.device)
 
-    # 简单解析
-    text = text.strip().upper()
-    if "A" in text and "B" not in text:
-        return "A"
-    if "B" in text and "A" not in text:
-        return "B"
+    generated_ids = model.generate(**inputs, max_new_tokens=10)
 
-    return "UNKNOWN"
+    generated_ids_trimmed = [
+        out_ids[len(in_ids):]
+        for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+    ]
 
+    raw_text = processor.batch_decode(
+        generated_ids_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False
+    )[0]
+
+    raw_upper = raw_text.strip().upper()
+
+    if raw_upper.startswith("A") or "ANSWER: A" in raw_upper:
+        pred = "A"
+    elif raw_upper.startswith("B") or "ANSWER: B" in raw_upper:
+        pred = "B"
+    else:
+        pred = "UNKNOWN"
+
+    return pred, raw_text
 
 # ====== run ======
 for item in data:
-    pred = ask_model(
+    pred, raw_response = ask_model(
         item["video_path"],
         item["option_A"],
         item["option_B"]
@@ -80,7 +105,8 @@ for item in data:
 
     results.append({
         "condition": item["condition"],
-        "correct": correct
+        "correct": correct,
+        "raw_response": raw_response
     })
 
     print(item["video_id"], pred, item["correct_option"], correct)
