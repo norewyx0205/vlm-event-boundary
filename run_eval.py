@@ -51,7 +51,7 @@ def ask_model(video_path, option_a, option_b):
     prompt = f"""
 Watch the video carefully.
 
-Which description correctly matches the order of events?
+Which statement correctly describes the order of events?
 
 A: {option_a}
 B: {option_b}

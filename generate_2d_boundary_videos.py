@@ -252,14 +252,53 @@ def get_timing(condition):
     }
 
 
-def make_sample(sample_id, condition):
+def make_base_specs():
+    base_specs = []
+
+    for base_id in range(1, SAMPLES_PER_CONDITION + 1):
+        colors = random.sample(list(COLORS.keys()), 2)
+        shapes = random.sample(SHAPES, 2)
+
+        color_1, color_2 = colors
+        shape_1, shape_2 = shapes
+
+        object_1_text = f"the {color_1} {shape_1}"
+        object_2_text = f"the {color_2} {shape_2}"
+        event_1_text = f"The {color_1} {shape_1} moved right."
+        event_2_text = f"The {color_2} {shape_2} moved left."
+
+        correct_sentence = f"The {color_1} {shape_1} moves before the {color_2} {shape_2}."
+        reversed_sentence = f"The {color_1} {shape_1} moves after the {color_2} {shape_2}."
+
+        if random.random() < 0.5:
+            option_a = correct_sentence
+            option_b = reversed_sentence
+            correct_option = "A"
+        else:
+            option_a = reversed_sentence
+            option_b = correct_sentence
+            correct_option = "B"
+
+        base_specs.append({
+            "base_id": base_id,
+            "shape_1": shape_1,
+            "shape_2": shape_2,
+            "color_1": color_1,
+            "color_2": color_2,
+            "object_1": object_1_text,
+            "object_2": object_2_text,
+            "event_1": event_1_text,
+            "event_2": event_2_text,
+            "option_A": option_a,
+            "option_B": option_b,
+            "correct_option": correct_option,
+        })
+
+    return base_specs
+
+
+def make_sample(sample_id, condition, base_spec):
     timing = get_timing(condition)
-
-    colors = random.sample(list(COLORS.keys()), 2)
-    shapes = random.sample(SHAPES, 2)
-
-    color_1, color_2 = colors
-    shape_1, shape_2 = shapes
 
     # Event 1: object 1 moves right.
     event_1_motion = {
@@ -277,29 +316,14 @@ def make_sample(sample_id, condition):
         "to": (250, 330),
     }
 
-    event_1_text = f"The {color_1} {shape_1} moved right."
-    event_2_text = f"The {color_2} {shape_2} moved left."
-
-    correct_sentence = f"{event_1_text} Then {event_2_text}"
-    reversed_sentence = f"{event_2_text} Then {event_1_text}"
-
-    if random.random() < 0.5:
-        option_a = correct_sentence
-        option_b = reversed_sentence
-        correct_option = "A"
-    else:
-        option_a = reversed_sentence
-        option_b = correct_sentence
-        correct_option = "B"
-
     base_name = f"sample_{sample_id:03d}_{condition}"
     final_video_path = VIDEO_DIR / f"{base_name}.mp4"
 
     spec = {
-        "shape_1": shape_1,
-        "shape_2": shape_2,
-        "color_1": color_1,
-        "color_2": color_2,
+        "shape_1": base_spec["shape_1"],
+        "shape_2": base_spec["shape_2"],
+        "color_1": base_spec["color_1"],
+        "color_2": base_spec["color_2"],
         "event_1_motion": event_1_motion,
         "event_2_motion": event_2_motion,
         "boundary_start_frame": timing["boundary_start"],
@@ -328,6 +352,7 @@ def make_sample(sample_id, condition):
         "video_path": str(final_video_path),
         "condition": condition,
         "boundary_type": condition.replace("_boundary", ""),
+        "base_sample_id": base_spec["base_id"],
         "fps": FPS,
         "duration_sec": DURATION_SEC,
         "total_frames": TOTAL_FRAMES,
@@ -343,16 +368,19 @@ def make_sample(sample_id, condition):
         "visual_marker": timing["visual_marker"],
         "audio_marker": timing["audio_marker"],
 
-        "shape_1": shape_1,
-        "color_1": color_1,
-        "shape_2": shape_2,
-        "color_2": color_2,
+        "shape_1": base_spec["shape_1"],
+        "color_1": base_spec["color_1"],
+        "shape_2": base_spec["shape_2"],
+        "color_2": base_spec["color_2"],
+        "object_1": base_spec["object_1"],
+        "object_2": base_spec["object_2"],
 
-        "event_1": event_1_text,
-        "event_2": event_2_text,
-        "option_A": option_a,
-        "option_B": option_b,
-        "correct_option": correct_option,
+        "event_1": base_spec["event_1"],
+        "event_2": base_spec["event_2"],
+        "prompt_relation_type": "before_after",
+        "option_A": base_spec["option_A"],
+        "option_B": base_spec["option_B"],
+        "correct_option": base_spec["correct_option"],
     }
 
     return annotation
@@ -363,10 +391,11 @@ def main():
 
     annotations = []
     sample_id = 1
+    base_specs = make_base_specs()
 
     for condition in CONDITIONS:
-        for _ in range(SAMPLES_PER_CONDITION):
-            ann = make_sample(sample_id, condition)
+        for base_spec in base_specs:
+            ann = make_sample(sample_id, condition, base_spec)
             annotations.append(ann)
             sample_id += 1
 
