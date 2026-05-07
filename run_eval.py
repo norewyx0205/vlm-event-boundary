@@ -147,6 +147,8 @@ def main():
         stats[item["condition"]]["correct"] += int(correct)
 
         print(
+            "option_A:"+item["option_A"],
+            "option_B:"+ item["option_B"],
             item["video_id"],
             "pred=", pred,
             "correct=", item["correct_option"],
