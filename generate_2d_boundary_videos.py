@@ -267,8 +267,21 @@ def make_base_specs():
         event_1_text = f"The {color_1} {shape_1} moved right."
         event_2_text = f"The {color_2} {shape_2} moved left."
 
-        correct_sentence = f"The {color_1} {shape_1} moves before the {color_2} {shape_2}."
-        reversed_sentence = f"The {color_1} {shape_1} moves after the {color_2} {shape_2}."
+        if base_id % 2 == 1:
+            relation_subject = "event_1_object"
+            correct_relation = "before"
+            incorrect_relation = "after"
+            subject_text = object_1_text
+            object_text = object_2_text
+        else:
+            relation_subject = "event_2_object"
+            correct_relation = "after"
+            incorrect_relation = "before"
+            subject_text = object_2_text
+            object_text = object_1_text
+
+        correct_sentence = f"{subject_text.capitalize()} moves {correct_relation} {object_text}."
+        reversed_sentence = f"{subject_text.capitalize()} moves {incorrect_relation} {object_text}."
 
         if random.random() < 0.5:
             option_a = correct_sentence
@@ -289,6 +302,9 @@ def make_base_specs():
             "object_2": object_2_text,
             "event_1": event_1_text,
             "event_2": event_2_text,
+            "relation_subject": relation_subject,
+            "correct_relation": correct_relation,
+            "incorrect_relation": incorrect_relation,
             "option_A": option_a,
             "option_B": option_b,
             "correct_option": correct_option,
@@ -378,6 +394,9 @@ def make_sample(sample_id, condition, base_spec):
         "event_1": base_spec["event_1"],
         "event_2": base_spec["event_2"],
         "prompt_relation_type": "before_after",
+        "relation_subject": base_spec["relation_subject"],
+        "correct_relation": base_spec["correct_relation"],
+        "incorrect_relation": base_spec["incorrect_relation"],
         "option_A": base_spec["option_A"],
         "option_B": base_spec["option_B"],
         "correct_option": base_spec["correct_option"],
