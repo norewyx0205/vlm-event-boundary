@@ -161,6 +161,54 @@ results/
 
 This makes it easier to compare baseline runs and future hard-set iterations.
 
+## Run OpenAI GPT Evaluation
+
+OpenAI vision models currently receive image inputs through the API, so `run_eval_openai.py` samples frames from each video and sends the ordered frame sequence to GPT.
+
+Set your API key first:
+
+```bash
+export OPENAI_API_KEY="your_api_key"
+```
+
+Run a baseline smoke test:
+
+```bash
+python3 run_eval_openai.py \
+  --model-name gpt-4.1 \
+  --annotation-path /content/vlm-event-boundary/baseline_boundary_videos/annotations.jsonl \
+  --experiment-version baseline_gpt_smoke_test \
+  --max-samples 4
+```
+
+Run the full baseline set:
+
+```bash
+python3 run_eval_openai.py \
+  --model-name gpt-4.1 \
+  --annotation-path /content/vlm-event-boundary/baseline_boundary_videos/annotations.jsonl \
+  --experiment-version baseline_gpt
+```
+
+Run the hard set:
+
+```bash
+python3 run_eval_openai.py \
+  --model-name gpt-4.1 \
+  --annotation-path /content/vlm-event-boundary/synthetic_boundary_videos/annotations.jsonl \
+  --experiment-version hard_v1_gpt
+```
+
+Useful frame sampling arguments:
+
+```text
+--frame-count       Number of frames sampled uniformly from each video
+--max-frame-width   Resize sampled frames before sending
+--image-detail      OpenAI image detail setting: low, high, or auto
+```
+
+Important limitation: this GPT evaluation uses sampled visual frames only. It does not pass the audio track, so the beep in `audio_boundary` is not available as audio input to the model.
+
 ## Dependencies
 
 Video generation requires:
@@ -176,6 +224,12 @@ pip install torch transformers accelerate qwen-vl-utils
 ```
 
 For Qwen3-VL, use a recent Transformers version that supports the selected Qwen3-VL model.
+
+OpenAI GPT evaluation additionally requires:
+
+```bash
+pip install openai
+```
 
 ## Notes
 
