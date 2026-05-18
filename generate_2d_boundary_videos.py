@@ -5,6 +5,7 @@ import wave
 import subprocess
 import imageio_ffmpeg
 import numpy as np
+import argparse
 from pathlib import Path
 
 
@@ -17,6 +18,9 @@ VIDEO_DIR = OUT_DIR / "videos"
 ANNOTATION_PATH = OUT_DIR / "annotations.jsonl"
 
 VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
+HARD_OUT_DIR = Path("synthetic_boundary_videos")
+BASELINE_OUT_DIR = Path("baseline_boundary_videos")
 
 W, H = 512, 512
 FPS = 15
@@ -31,6 +35,7 @@ VISUAL_MARKER_FRAMES = 15 # 1 second
 AUDIO_MARKER_DURATION = 0.35
 
 SAMPLES_PER_CONDITION = 30
+BASELINE_SAMPLES_PER_CONDITION = 5
 DISTRACTOR_COUNT_RANGE = (1, 2)
 UNRELATED_EVENT_START = 165
 UNRELATED_EVENT_DURATION = 30
@@ -351,6 +356,40 @@ def event_text(obj):
     return f"The {obj['color']} {obj['shape']} moved {obj['path']['direction']}."
 
 
+def make_counterbalanced_annotations(annotation):
+    first = dict(annotation)
+    first["eval_id"] = f"{annotation['video_id']}::prompt_original"
+    first["prompt_variant"] = "original"
+
+    second = dict(annotation)
+    second["eval_id"] = f"{annotation['video_id']}::prompt_swapped"
+    second["prompt_variant"] = "swapped"
+    second["option_A"] = annotation["option_B"]
+    second["option_B"] = annotation["option_A"]
+    second["correct_option"] = "B" if annotation["correct_option"] == "A" else "A"
+
+    return [first, second]
+
+
+def configure_output(out_dir):
+    global OUT_DIR, VIDEO_DIR, ANNOTATION_PATH
+
+    OUT_DIR = Path(out_dir)
+    VIDEO_DIR = OUT_DIR / "videos"
+    ANNOTATION_PATH = OUT_DIR / "annotations.jsonl"
+    VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def configure_timing(duration_sec, samples_per_condition, start_hold, unrelated_event_start):
+    global DURATION_SEC, TOTAL_FRAMES, SAMPLES_PER_CONDITION, START_HOLD, UNRELATED_EVENT_START
+
+    DURATION_SEC = duration_sec
+    TOTAL_FRAMES = FPS * DURATION_SEC
+    SAMPLES_PER_CONDITION = samples_per_condition
+    START_HOLD = start_hold
+    UNRELATED_EVENT_START = unrelated_event_start
+
+
 def make_base_specs():
     base_specs = []
 
@@ -540,6 +579,7 @@ def make_sample(sample_id, condition, base_spec):
     annotation = {
         "video_id": final_video_path.name,
         "video_path": str(final_video_path),
+        "dataset": "hard",
         "condition": condition,
         "boundary_type": condition.replace("_boundary", ""),
         "base_sample_id": base_spec["base_id"],
@@ -608,39 +648,312 @@ def make_sample(sample_id, condition, base_spec):
     return annotation
 
 
+def get_baseline_timing(condition):
+    first_start = START_HOLD
+    first_end = first_start + EVENT_DURATION
+
+    if condition == "low_boundary":
+        boundary_start = first_end
+        boundary_end = first_end
+        second_start = first_end
+        gap_frames = 0
+        visual_marker = "none"
+        audio_marker = "none"
+    elif condition == "temporal_boundary":
+        boundary_start = first_end
+        boundary_end = first_end + TEMPORAL_GAP_FRAMES
+        second_start = boundary_end
+        gap_frames = TEMPORAL_GAP_FRAMES
+        visual_marker = "none"
+        audio_marker = "none"
+    elif condition == "visual_boundary":
+        boundary_start = first_end
+        boundary_end = first_end + VISUAL_MARKER_FRAMES
+        second_start = boundary_end
+        gap_frames = 0
+        visual_marker = "white_flash_black_dot"
+        audio_marker = "none"
+    elif condition == "audio_boundary":
+        boundary_start = first_end
+        boundary_end = first_end + VISUAL_MARKER_FRAMES
+        second_start = boundary_end
+        gap_frames = 0
+        visual_marker = "none"
+        audio_marker = "beep"
+    else:
+        raise ValueError(f"Unknown condition: {condition}")
+
+    second_end = second_start + EVENT_DURATION
+
+    if second_end >= TOTAL_FRAMES:
+        raise ValueError("Baseline timing exceeds total video length.")
+
+    return {
+        "first_start": first_start,
+        "first_end": first_end,
+        "second_start": second_start,
+        "second_end": second_end,
+        "boundary_start": boundary_start,
+        "boundary_end": boundary_end,
+        "gap_frames": gap_frames,
+        "visual_marker": visual_marker,
+        "audio_marker": audio_marker,
+    }
+
+
+def make_baseline_base_specs():
+    base_specs = []
+
+    for base_id in range(1, BASELINE_SAMPLES_PER_CONDITION + 1):
+        colors = random.sample(list(COLORS.keys()), 2)
+        shapes = random.sample(SHAPES, 2)
+
+        object_1 = {
+            "id": 1,
+            "shape": shapes[0],
+            "color": colors[0],
+            "path": {
+                "direction": "right",
+                "from": (120, 180),
+                "to": (260, 180),
+            },
+        }
+        object_2 = {
+            "id": 2,
+            "shape": shapes[1],
+            "color": colors[1],
+            "path": {
+                "direction": "left",
+                "from": (390, 330),
+                "to": (250, 330),
+            },
+        }
+
+        correct_relation = "before" if base_id % 2 == 1 else "after"
+        incorrect_relation = "after" if correct_relation == "before" else "before"
+
+        if correct_relation == "before":
+            relation_subject = "first_event_object"
+            subject_text = object_text(object_1)
+            object_text_for_relation = object_text(object_2)
+        else:
+            relation_subject = "second_event_object"
+            subject_text = object_text(object_2)
+            object_text_for_relation = object_text(object_1)
+
+        correct_sentence = f"{subject_text.capitalize()} moves {correct_relation} {object_text_for_relation}."
+        incorrect_sentence = f"{subject_text.capitalize()} moves {incorrect_relation} {object_text_for_relation}."
+
+        if random.random() < 0.5:
+            option_a = correct_sentence
+            option_b = incorrect_sentence
+            correct_option = "A"
+        else:
+            option_a = incorrect_sentence
+            option_b = correct_sentence
+            correct_option = "B"
+
+        base_specs.append({
+            "base_id": base_id,
+            "object_1": object_1,
+            "object_2": object_2,
+            "first_object_id": 1,
+            "second_object_id": 2,
+            "first_event": event_text(object_1),
+            "second_event": event_text(object_2),
+            "relation_subject": relation_subject,
+            "correct_relation": correct_relation,
+            "incorrect_relation": incorrect_relation,
+            "option_A": option_a,
+            "option_B": option_b,
+            "correct_option": correct_option,
+            "distractors": [],
+        })
+
+    return base_specs
+
+
+def make_baseline_sample(sample_id, condition, base_spec):
+    timing = get_baseline_timing(condition)
+
+    object_1 = base_spec["object_1"]
+    object_2 = base_spec["object_2"]
+
+    object_1_motion = make_motion(object_1["path"], timing["first_start"], timing["first_end"])
+    object_2_motion = make_motion(object_2["path"], timing["second_start"], timing["second_end"])
+
+    base_name = f"baseline_{sample_id:03d}_{condition}"
+    final_video_path = VIDEO_DIR / f"{base_name}.mp4"
+
+    spec = {
+        "shape_1": object_1["shape"],
+        "shape_2": object_2["shape"],
+        "color_1": object_1["color"],
+        "color_2": object_2["color"],
+        "object_1_motion": object_1_motion,
+        "object_2_motion": object_2_motion,
+        "distractors": [],
+        "boundary_start_frame": timing["boundary_start"],
+        "boundary_end_frame": timing["boundary_end"],
+    }
+
+    if condition == "audio_boundary":
+        silent_path = VIDEO_DIR / f"{base_name}_silent.mp4"
+        make_silent_video(silent_path, condition, spec)
+
+        beep_time = timing["boundary_start"] / FPS
+        add_beep_to_video(
+            video_path=silent_path,
+            output_path=final_video_path,
+            beep_time=beep_time,
+            duration=AUDIO_MARKER_DURATION,
+        )
+
+        silent_path.unlink(missing_ok=True)
+    else:
+        make_silent_video(final_video_path, condition, spec)
+
+    return {
+        "video_id": final_video_path.name,
+        "video_path": str(final_video_path),
+        "dataset": "baseline",
+        "condition": condition,
+        "boundary_type": condition.replace("_boundary", ""),
+        "base_sample_id": base_spec["base_id"],
+        "fps": FPS,
+        "duration_sec": DURATION_SEC,
+        "total_frames": TOTAL_FRAMES,
+        "first_event_start_frame": timing["first_start"],
+        "first_event_end_frame": timing["first_end"],
+        "second_event_start_frame": timing["second_start"],
+        "second_event_end_frame": timing["second_end"],
+        "boundary_start_frame": timing["boundary_start"],
+        "boundary_end_frame": timing["boundary_end"],
+        "gap_frames": timing["gap_frames"],
+        "visual_marker": timing["visual_marker"],
+        "audio_marker": timing["audio_marker"],
+        "shape_1": object_1["shape"],
+        "color_1": object_1["color"],
+        "direction_1": object_1["path"]["direction"],
+        "object_1": object_text(object_1),
+        "object_1_start_frame": timing["first_start"],
+        "object_1_end_frame": timing["first_end"],
+        "object_1_from": object_1["path"]["from"],
+        "object_1_to": object_1["path"]["to"],
+        "shape_2": object_2["shape"],
+        "color_2": object_2["color"],
+        "direction_2": object_2["path"]["direction"],
+        "object_2": object_text(object_2),
+        "object_2_start_frame": timing["second_start"],
+        "object_2_end_frame": timing["second_end"],
+        "object_2_from": object_2["path"]["from"],
+        "object_2_to": object_2["path"]["to"],
+        "first_object_id": base_spec["first_object_id"],
+        "second_object_id": base_spec["second_object_id"],
+        "event_1": base_spec["first_event"],
+        "event_2": base_spec["second_event"],
+        "prompt_relation_type": "before_after_counterbalanced",
+        "relation_subject": base_spec["relation_subject"],
+        "correct_relation": base_spec["correct_relation"],
+        "incorrect_relation": base_spec["incorrect_relation"],
+        "option_A": base_spec["option_A"],
+        "option_B": base_spec["option_B"],
+        "correct_option": base_spec["correct_option"],
+        "distractor_count": 0,
+        "distractors": [],
+    }
+
+
 def cleanup_generated_videos():
     for path in VIDEO_DIR.glob("sample_*.mp4"):
         path.unlink()
+    for path in VIDEO_DIR.glob("baseline_*.mp4"):
+        path.unlink()
     for path in VIDEO_DIR.glob("sample_*_silent.mp4"):
+        path.unlink()
+    for path in VIDEO_DIR.glob("baseline_*_silent.mp4"):
         path.unlink()
 
 
 def main():
-    random.seed(42)
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dataset",
+        choices=["hard", "baseline", "all"],
+        default="all",
+        help="Which dataset to generate.",
+    )
+    args = parser.parse_args()
 
-    cleanup_generated_videos()
+    if args.dataset in ("hard", "all"):
+        random.seed(42)
+        configure_output(HARD_OUT_DIR)
+        configure_timing(
+            duration_sec=20,
+            samples_per_condition=30,
+            start_hold=30,
+            unrelated_event_start=165,
+        )
 
-    annotations = []
-    sample_id = 1
-    base_specs = make_base_specs()
+        cleanup_generated_videos()
 
-    for condition in CONDITIONS:
-        for base_spec in base_specs:
-            ann = make_sample(sample_id, condition, base_spec)
-            annotations.append(ann)
-            sample_id += 1
+        annotations = []
+        sample_id = 1
+        base_specs = make_base_specs()
 
-    with open(ANNOTATION_PATH, "w", encoding="utf-8") as f:
-        for item in annotations:
-            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+        for condition in CONDITIONS:
+            for base_spec in base_specs:
+                ann = make_sample(sample_id, condition, base_spec)
+                annotations.extend(make_counterbalanced_annotations(ann))
+                sample_id += 1
 
-    print(f"Generated {len(annotations)} videos.")
-    print(f"Videos saved to: {VIDEO_DIR}")
-    print(f"Annotations saved to: {ANNOTATION_PATH}")
+        with open(ANNOTATION_PATH, "w", encoding="utf-8") as f:
+            for item in annotations:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
 
-    print("\nCondition counts:")
-    for condition in CONDITIONS:
-        print(f"- {condition}: {SAMPLES_PER_CONDITION}")
+        print(f"Generated {sample_id - 1} hard videos.")
+        print(f"Generated {len(annotations)} hard evaluation rows.")
+        print(f"Videos saved to: {VIDEO_DIR}")
+        print(f"Annotations saved to: {ANNOTATION_PATH}")
+
+        print("\nHard condition video counts:")
+        for condition in CONDITIONS:
+            print(f"- {condition}: {SAMPLES_PER_CONDITION}")
+
+    if args.dataset in ("baseline", "all"):
+        random.seed(42)
+        configure_output(BASELINE_OUT_DIR)
+        configure_timing(
+            duration_sec=10,
+            samples_per_condition=BASELINE_SAMPLES_PER_CONDITION,
+            start_hold=15,
+            unrelated_event_start=0,
+        )
+
+        cleanup_generated_videos()
+
+        annotations = []
+        sample_id = 1
+        base_specs = make_baseline_base_specs()
+
+        for condition in CONDITIONS:
+            for base_spec in base_specs:
+                ann = make_baseline_sample(sample_id, condition, base_spec)
+                annotations.extend(make_counterbalanced_annotations(ann))
+                sample_id += 1
+
+        with open(ANNOTATION_PATH, "w", encoding="utf-8") as f:
+            for item in annotations:
+                f.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+        print(f"\nGenerated {sample_id - 1} baseline videos.")
+        print(f"Generated {len(annotations)} baseline evaluation rows.")
+        print(f"Videos saved to: {VIDEO_DIR}")
+        print(f"Annotations saved to: {ANNOTATION_PATH}")
+
+        print("\nBaseline condition video counts:")
+        for condition in CONDITIONS:
+            print(f"- {condition}: {BASELINE_SAMPLES_PER_CONDITION}")
 
 
 if __name__ == "__main__":
