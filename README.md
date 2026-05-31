@@ -1,239 +1,217 @@
-# VLM Event Boundary Evaluation
+# VLM Event Boundary Ladder Experiment
 
-This project generates synthetic 2D videos for testing whether video-text models understand event order under different boundary cues.
+This project evaluates video-text models on forced-choice event-order matching. Each video contains two target events performed by 2D geometric objects. The model receives two `before/after` statements and must choose the statement that matches the video.
 
-The current setup contains two datasets:
-
-- `baseline_boundary_videos/`: easy baseline set. This preserves the original 20-video style where the model should be able to distinguish event order.
-- `synthetic_boundary_videos/`: harder set with longer videos, randomized order/positions/directions, distractors, and counterbalanced prompts.
-
-Both datasets use `before/after` prompt options because this wording is the target experimental manipulation.
-
-## Dataset Structure
-
-Each dataset directory contains:
+Example prompt options:
 
 ```text
-<dataset_dir>/
-  annotations.jsonl
-  videos/
-    *.mp4
+A: The orange circle moves before the blue square.
+B: The orange circle moves after the blue square.
 ```
 
-The annotation file has one JSON object per evaluation prompt. A single video appears twice:
+Each video is evaluated twice with mirrored prompts:
 
-- `prompt_original`
-- `prompt_swapped`
+- `original`: correct sentence in option A
+- `swapped`: correct sentence in option B
 
-These two rows use the same `video_id` but swap `option_A` and `option_B`. This balances whether the correct answer is A or B and supports analysis of A-bias.
+This counterbalances answer position and supports response-bias analysis.
 
-## Generate Videos
-
-Generate both datasets:
-
-```bash
-python3 generate_2d_boundary_videos.py --dataset all
-```
-
-Generate only the hard dataset:
-
-```bash
-python3 generate_2d_boundary_videos.py --dataset hard
-```
-
-Generate only the baseline dataset:
-
-```bash
-python3 generate_2d_boundary_videos.py --dataset baseline
-```
-
-The `--dataset` argument accepts:
-
-- `all`: generate both hard and baseline datasets
-- `hard`: generate `synthetic_boundary_videos`
-- `baseline`: generate `baseline_boundary_videos`
-
-## Dataset Sizes
-
-Current generated sizes:
+## Project Structure
 
 ```text
-baseline:
-  20 videos
-  40 evaluation rows
-  5 videos per condition
-
-hard:
-  120 videos
-  240 evaluation rows
-  30 videos per condition
+vlm-event-boundary/
+  data/
+    ladder_v1/
+      level_1_simple/
+        videos/
+        annotations.jsonl
+      level_2_randomized/
+        videos/
+        annotations.jsonl
+      level_3_static_distractors/
+        videos/
+        annotations.jsonl
+      level_4_moving_distractors/
+        videos/
+        annotations.jsonl
+    README.md
+  scripts/
+    generate_ladder_dataset.py
+    run_eval.py
+    analyze_results.py
+    make_mirrored_annotations.py
+  results/
+  notebooks/
+    colab_eval.ipynb
+  README.md
 ```
 
-Conditions:
+Legacy root scripts are kept for backwards compatibility, but new experiments should use the `scripts/` pipeline.
+
+## Difficulty Ladder
+
+| Level | Name | Description |
+| --- | --- | --- |
+| 1 | `level_1_simple` | Two target objects, no distractors, short fixed/simple videos. Sanity check. |
+| 2 | `level_2_randomized` | Randomized target positions, motion directions, and which object moves first. No distractors. |
+| 3 | `level_3_static_distractors` | Level 2 plus 1-2 static distractor objects. Tests visual object binding. |
+| 4 | `level_4_moving_distractors` | Level 2 plus static/moving distractors and a later unrelated motion event. Hard setting. |
+
+All levels include four boundary conditions:
 
 - `low_boundary`
 - `temporal_boundary`
 - `visual_boundary`
 - `audio_boundary`
 
-## Run Evaluation
+## Generate Ladder Data
 
-Default evaluation uses Qwen2-VL:
-
-```bash
-python3 run_eval.py
-```
-
-Run the hard dataset with a specific model:
+Default generation:
 
 ```bash
-python3 run_eval.py \
-  --model-name Qwen/Qwen2-VL-2B-Instruct \
-  --annotation-path /content/vlm-event-boundary/synthetic_boundary_videos/annotations.jsonl
+python scripts/generate_ladder_dataset.py \
+  --dataset_version ladder_v1 \
+  --samples_per_level 30 \
+  --output_root data/ladder_v1 \
+  --seed 42
 ```
 
-Run the baseline dataset:
-
-```bash
-python3 run_eval.py \
-  --model-name Qwen/Qwen2-VL-2B-Instruct \
-  --annotation-path /content/vlm-event-boundary/baseline_boundary_videos/annotations.jsonl
-```
-
-Run a Qwen3-VL model:
-
-```bash
-python3 run_eval.py \
-  --model-name Qwen/Qwen3-VL-8B-Instruct \
-  --annotation-path /content/vlm-event-boundary/synthetic_boundary_videos/annotations.jsonl \
-  --experiment-version hard_v1
-```
-
-For a quick smoke test:
-
-```bash
-python3 run_eval.py \
-  --annotation-path /content/vlm-event-boundary/baseline_boundary_videos/annotations.jsonl \
-  --experiment-version baseline \
-  --max-samples 4
-```
-
-## Evaluation Arguments
-
-`run_eval.py` supports:
+Useful generation arguments:
 
 ```text
---model-name       Hugging Face model id
---annotation-path  Path to annotations.jsonl
---result-dir       Root directory for timestamped result folders
---output-name      Optional raw result filename
---experiment-version Dataset or experiment version label
---max-samples      Optional limit for quick tests
+--samples_per_level
+--fps
+--level_durations          Comma-separated durations for levels 1-4, default 10,12,14,20
+--event_duration_sec
+--temporal_gap_sec
+--visual_marker_sec
+--audio_beep_duration_sec
+--static_distractors
+--moving_distractors
+--disable_unrelated_later_motion
+--seed
+--output_root
 ```
 
-The script prints:
-
-- accuracy by boundary condition
-- accuracy by correct option, useful for A-bias
-- accuracy by prompt variant, useful for swapped-prompt checks
-
-Each run is saved in a timestamped directory:
+Each `annotations.jsonl` is evaluation-level: one row per prompt, not one row per unique video. Every video has two rows with unique `eval_id`, for example:
 
 ```text
-<result-dir>/
-  <experiment-version>/
-    <model-name>/
-      <YYYYMMDD_HHMMSS>/
-        raw_results.jsonl
-        summary.json
-        summary.txt
-        config.json
+level_2_sample_001_low_boundary_original
+level_2_sample_001_low_boundary_swapped
 ```
 
-For example:
+For a fixed `base_sample_id`, the two target objects keep the same color and shape across all four difficulty levels and all four boundary conditions. Across levels, only the difficulty manipulation changes: motion path, target order, distractors, and temporal complexity.
+
+After generation, verify the dataset controls:
+
+```bash
+python scripts/check_ladder_dataset.py --root data/ladder_v1
+```
+
+## Run Qwen Evaluation
+
+Run one level:
+
+```bash
+python scripts/run_eval.py \
+  --annotation_path data/ladder_v1/level_1_simple/annotations.jsonl \
+  --model_name Qwen/Qwen2-VL-2B-Instruct \
+  --dataset_name ladder_v1_level_1_simple \
+  --output_dir results
+```
+
+Run Qwen3-VL:
+
+```bash
+python scripts/run_eval.py \
+  --annotation_path data/ladder_v1/level_4_moving_distractors/annotations.jsonl \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name ladder_v1_level_4_moving_distractors \
+  --output_dir results
+```
+
+Quick smoke test:
+
+```bash
+python scripts/run_eval.py \
+  --annotation_path data/ladder_v1/level_1_simple/annotations.jsonl \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name ladder_v1_level_1_simple_smoke \
+  --output_dir results \
+  --max_samples 4
+```
+
+Results are saved to:
 
 ```text
-results/
-  hard_v1/
-    Qwen_Qwen3-VL-8B-Instruct/
-      20260518_172530/
+results/<safe_model_name>/<dataset_name>/<timestamp>/
+  raw_results.jsonl
+  summary.json
+  config.json
 ```
 
-This makes it easier to compare baseline runs and future hard-set iterations.
+## Analyze Results
 
-## Run OpenAI GPT Evaluation
-
-OpenAI vision models currently receive image inputs through the API, so `run_eval_openai.py` samples frames from each video and sends the ordered frame sequence to GPT.
-
-Set your API key first:
+Analyze a single run:
 
 ```bash
-export OPENAI_API_KEY="your_api_key"
+python scripts/analyze_results.py \
+  --input results/Qwen_Qwen3-VL-8B-Instruct/ladder_v1_level_4_moving_distractors/<timestamp>/raw_results.jsonl \
+  --output_dir analysis/ladder_v1_qwen3_level4 \
+  --plots
 ```
 
-Run a baseline smoke test:
+Analyze a directory containing multiple run folders:
 
 ```bash
-python3 run_eval_openai.py \
-  --model-name gpt-4.1 \
-  --annotation-path /content/vlm-event-boundary/baseline_boundary_videos/annotations.jsonl \
-  --experiment-version baseline_gpt_smoke_test \
-  --max-samples 4
+python scripts/analyze_results.py \
+  --input results/Qwen_Qwen3-VL-8B-Instruct \
+  --dataset_name_prefix ladder_v1_level_ \
+  --output_dir analysis/ladder_v1_qwen3_all \
+  --plots
 ```
 
-Run the full baseline set:
+The analyzer saves:
 
-```bash
-python3 run_eval_openai.py \
-  --model-name gpt-4.1 \
-  --annotation-path /content/vlm-event-boundary/baseline_boundary_videos/annotations.jsonl \
-  --experiment-version baseline_gpt
-```
+- `accuracy_by_difficulty.csv`
+- `accuracy_by_difficulty_condition.csv`
+- `accuracy_by_correct_option.csv`
+- `accuracy_by_prompt_variant.csv`
+- `prediction_distribution.csv`
+- `swap_consistency_summary.csv`
+- `swap_consistency_details.csv`
+- `summary.json`
+- optional `accuracy_by_difficulty_condition.png`
 
-Run the hard set:
+Swap consistency categories:
 
-```bash
-python3 run_eval_openai.py \
-  --model-name gpt-4.1 \
-  --annotation-path /content/vlm-event-boundary/synthetic_boundary_videos/annotations.jsonl \
-  --experiment-version hard_v1_gpt
-```
-
-Useful frame sampling arguments:
-
-```text
---frame-count       Number of frames sampled uniformly from each video
---max-frame-width   Resize sampled frames before sending
---image-detail      OpenAI image detail setting: low, high, or auto
-```
-
-Important limitation: this GPT evaluation uses sampled visual frames only. It does not pass the audio track, so the beep in `audio_boundary` is not available as audio input to the model.
+- `both_correct`
+- `both_wrong`
+- `original_correct_swapped_wrong`
+- `original_wrong_swapped_correct`
 
 ## Dependencies
 
-Video generation requires:
+Generation:
 
 ```bash
 pip install opencv-python numpy imageio-ffmpeg
 ```
 
-Model evaluation requires a working PyTorch/Transformers environment plus Qwen video utilities:
+Qwen evaluation:
 
 ```bash
-pip install torch transformers accelerate qwen-vl-utils
+pip install torch transformers accelerate qwen-vl-utils decord
 ```
 
-For Qwen3-VL, use a recent Transformers version that supports the selected Qwen3-VL model.
+Analysis uses the same `opencv-python` and `numpy` dependencies as generation.
 
-OpenAI GPT evaluation additionally requires:
+## Colab
 
-```bash
-pip install openai
-```
+Use `notebooks/colab_eval.ipynb` for Colab. It contains cells for:
 
-## Notes
-
-- Baseline videos are intentionally simple and should function as a sanity check.
-- Hard videos are longer and include randomized target order, randomized motion directions, randomized positions, and distractor objects.
-- The annotation rows are evaluation prompts, not unique videos. Use `eval_id` for prompt-level analysis and `video_id` for video-level pairing.
-- The `before/after` relation and A/B correct option are balanced in both datasets.
+- cloning/pulling the repo
+- installing dependencies
+- generating the ladder dataset
+- running Qwen3-VL on each level
+- analyzing saved results
