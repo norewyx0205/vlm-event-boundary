@@ -8,6 +8,11 @@ import torch
 from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
 try:
+    from transformers import BitsAndBytesConfig
+except ImportError:
+    BitsAndBytesConfig = None
+
+try:
     from transformers import AutoModelForImageTextToText
 except ImportError:
     AutoModelForImageTextToText = None
@@ -47,13 +52,31 @@ def parse_answer(raw_text):
     return "UNKNOWN"
 
 
-def load_model(model_name):
+def model_kwargs(load_in_4bit):
+    kwargs = {
+        "dtype": torch.float16,
+        "device_map": "auto",
+    }
+    if load_in_4bit:
+        if BitsAndBytesConfig is None:
+            raise ImportError("4-bit loading requires transformers BitsAndBytesConfig and bitsandbytes.")
+        kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+        )
+        kwargs.pop("dtype", None)
+    return kwargs
+
+
+def load_model(model_name, load_in_4bit=False):
+    kwargs = model_kwargs(load_in_4bit)
     if AutoModelForImageTextToText is not None:
         try:
             model = AutoModelForImageTextToText.from_pretrained(
                 model_name,
-                dtype=torch.float16,
-                device_map="auto",
+                **kwargs,
             )
             processor = AutoProcessor.from_pretrained(model_name)
             return model, processor
@@ -62,8 +85,7 @@ def load_model(model_name):
 
     model = Qwen2VLForConditionalGeneration.from_pretrained(
         model_name,
-        dtype=torch.float16,
-        device_map="auto",
+        **kwargs,
     )
     processor = AutoProcessor.from_pretrained(model_name)
     return model, processor
@@ -93,7 +115,7 @@ def process_video_inputs(messages):
     return image_inputs, video_inputs, video_kwargs
 
 
-def ask_model(model, processor, video_path, option_a, option_b):
+def ask_model(model, processor, video_path, option_a, option_b, video_fps, video_max_pixels):
     prompt = f"""
 Watch the video carefully.
 
@@ -108,7 +130,12 @@ Answer with only A or B.
     messages = [{
         "role": "user",
         "content": [
-            {"type": "video", "video": video_path},
+            {
+                "type": "video",
+                "video": video_path,
+                "fps": video_fps,
+                "max_pixels": video_max_pixels,
+            },
             {"type": "text", "text": prompt},
         ],
     }]
@@ -124,7 +151,8 @@ Answer with only A or B.
         return_tensors="pt",
     ).to(model.device)
 
-    generated_ids = model.generate(**inputs, max_new_tokens=10, do_sample=False)
+    with torch.inference_mode():
+        generated_ids = model.generate(**inputs, max_new_tokens=10, do_sample=False)
     generated_ids_trimmed = [
         out_ids[len(in_ids):]
         for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -134,6 +162,9 @@ Answer with only A or B.
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )[0]
+    del inputs, generated_ids, generated_ids_trimmed
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return parse_answer(raw_text), raw_text
 
 
@@ -155,6 +186,26 @@ def main():
     parser.add_argument("--dataset_name", "--dataset-name", default=None)
     parser.add_argument("--output_dir", "--output-dir", "--result-dir", default=str(PROJECT_ROOT / "results"))
     parser.add_argument("--max_samples", "--max-samples", type=int, default=None)
+    parser.add_argument(
+        "--video_fps",
+        "--video-fps",
+        type=float,
+        default=1.0,
+        help="Frames sampled per second from each video. Lower values reduce GPU memory use.",
+    )
+    parser.add_argument(
+        "--video_max_pixels",
+        "--video-max-pixels",
+        type=int,
+        default=150000,
+        help="Maximum pixels per sampled video frame. Lower values reduce visual tokens and GPU memory use.",
+    )
+    parser.add_argument(
+        "--load_in_4bit",
+        "--load-in-4bit",
+        action="store_true",
+        help="Load the model with bitsandbytes 4-bit quantization. Recommended for Qwen3-VL-8B on Colab T4.",
+    )
     parser.add_argument(
         "--experiment_version",
         "--experiment-version",
@@ -180,7 +231,7 @@ def main():
     summary_path = run_dir / "summary.json"
     config_path = run_dir / "config.json"
 
-    model, processor = load_model(args.model_name)
+    model, processor = load_model(args.model_name, load_in_4bit=args.load_in_4bit)
     data = read_jsonl(args.annotation_path)
     if args.max_samples is not None:
         data = data[:args.max_samples]
@@ -201,6 +252,8 @@ def main():
             item["video_path"],
             item["option_A"],
             item["option_B"],
+            args.video_fps,
+            args.video_max_pixels,
         )
         correct = pred == item["correct_option"]
 

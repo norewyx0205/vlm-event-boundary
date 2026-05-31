@@ -119,7 +119,9 @@ python scripts/run_eval.py \
   --annotation_path data/ladder_v1/level_1_simple/annotations.jsonl \
   --model_name Qwen/Qwen2-VL-2B-Instruct \
   --dataset_name ladder_v1_level_1_simple \
-  --output_dir results
+  --output_dir results \
+  --video_fps 1 \
+  --video_max_pixels 150000
 ```
 
 Run Qwen3-VL:
@@ -129,7 +131,10 @@ python scripts/run_eval.py \
   --annotation_path data/ladder_v1/level_4_moving_distractors/annotations.jsonl \
   --model_name Qwen/Qwen3-VL-8B-Instruct \
   --dataset_name ladder_v1_level_4_moving_distractors \
-  --output_dir results
+  --output_dir results \
+  --video_fps 1 \
+  --video_max_pixels 150000 \
+  --load_in_4bit
 ```
 
 Quick smoke test:
@@ -140,7 +145,10 @@ python scripts/run_eval.py \
   --model_name Qwen/Qwen3-VL-8B-Instruct \
   --dataset_name ladder_v1_level_1_simple_smoke \
   --output_dir results \
-  --max_samples 4
+  --max_samples 4 \
+  --video_fps 1 \
+  --video_max_pixels 150000 \
+  --load_in_4bit
 ```
 
 Results are saved to:
@@ -203,8 +211,10 @@ pip install opencv-python numpy imageio-ffmpeg
 Qwen evaluation:
 
 ```bash
-pip install torch transformers accelerate qwen-vl-utils decord
+pip install torch transformers accelerate qwen-vl-utils decord bitsandbytes
 ```
+
+For Qwen3-VL-8B on a standard Colab T4, use `--load_in_4bit` plus low video sampling such as `--video_fps 1 --video_max_pixels 150000`; fp16 loading can run out of memory before the first sample finishes.
 
 Analysis uses the same `opencv-python` and `numpy` dependencies as generation.
 
