@@ -4,6 +4,11 @@ import json
 from pathlib import Path
 from collections import defaultdict, Counter
 
+try:
+    from .common import PROJECT_ROOT, read_jsonl
+except ImportError:
+    from common import PROJECT_ROOT, read_jsonl
+
 
 def load_result_files(path):
     path = Path(path)
@@ -25,15 +30,12 @@ def load_rows(paths, dataset_name_prefix=None):
         dataset_name = dataset_name_from_path(path)
         if dataset_name_prefix and not dataset_name.startswith(dataset_name_prefix):
             continue
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    row = json.loads(line)
-                    row["_source_file"] = str(path)
-                    row.setdefault("dataset_name", dataset_name)
-                    if dataset_name_prefix and not row.get("dataset_name", "").startswith(dataset_name_prefix):
-                        continue
-                    rows.append(row)
+        for row in read_jsonl(path):
+            row["_source_file"] = str(path)
+            row.setdefault("dataset_name", dataset_name)
+            if dataset_name_prefix and not row.get("dataset_name", "").startswith(dataset_name_prefix):
+                continue
+            rows.append(row)
     return rows
 
 
@@ -199,7 +201,7 @@ def make_plot(rows, output_path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="raw_results.jsonl file or directory containing run folders.")
-    parser.add_argument("--output_dir", default="analysis")
+    parser.add_argument("--output_dir", default=str(PROJECT_ROOT / "analysis"))
     parser.add_argument("--dataset_name_prefix", default=None, help="Only analyze rows/runs whose dataset_name starts with this prefix.")
     parser.add_argument("--plots", action="store_true")
     args = parser.parse_args()

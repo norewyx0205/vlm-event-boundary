@@ -1,16 +1,17 @@
 import argparse
-import json
 from collections import Counter, defaultdict
 from pathlib import Path
+
+try:
+    from .common import PROJECT_ROOT, read_jsonl
+except ImportError:
+    from common import PROJECT_ROOT, read_jsonl
 
 
 def load_rows(root):
     rows = []
     for ann_path in sorted(Path(root).glob("level_*/annotations.jsonl")):
-        with open(ann_path, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    rows.append(json.loads(line))
+        rows.extend(read_jsonl(ann_path))
     return rows
 
 
@@ -23,7 +24,7 @@ def target_identity(row):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", default="data/ladder_v1")
+    parser.add_argument("--root", default=str(PROJECT_ROOT / "data" / "ladder_v1"))
     args = parser.parse_args()
 
     rows = load_rows(args.root)

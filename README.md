@@ -36,17 +36,19 @@ vlm-event-boundary/
         annotations.jsonl
     README.md
   scripts/
+    common.py
     generate_ladder_dataset.py
     run_eval.py
     analyze_results.py
     make_mirrored_annotations.py
+    check_ladder_dataset.py
   results/
   notebooks/
     colab_eval.ipynb
   README.md
 ```
 
-Legacy root scripts are kept for backwards compatibility, but new experiments should use the `scripts/` pipeline.
+Legacy root scripts are kept for backwards compatibility, but new experiments should use the `scripts/` pipeline. In particular, `scripts/run_eval.py` is the canonical evaluation implementation; the root `run_eval.py` is only a thin wrapper for older commands.
 
 ## Difficulty Ladder
 

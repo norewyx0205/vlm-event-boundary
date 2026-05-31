@@ -12,6 +12,11 @@ try:
 except ImportError:
     AutoModelForImageTextToText = None
 
+try:
+    from .common import PROJECT_ROOT, read_jsonl, slugify, summarize_counts, write_jsonl
+except ImportError:
+    from common import PROJECT_ROOT, read_jsonl, slugify, summarize_counts, write_jsonl
+
 
 KEY_FIELDS = [
     "eval_id",
@@ -27,26 +32,6 @@ KEY_FIELDS = [
     "option_A",
     "option_B",
 ]
-
-
-def slugify(text):
-    keep = []
-    for ch in text:
-        if ch.isalnum():
-            keep.append(ch)
-        elif ch in ("-", "_", "."):
-            keep.append(ch)
-        else:
-            keep.append("_")
-    slug = "".join(keep).strip("_")
-    while "__" in slug:
-        slug = slug.replace("__", "_")
-    return slug or "unnamed"
-
-
-def load_data(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
 
 
 def parse_answer(raw_text):
@@ -84,12 +69,31 @@ def load_model(model_name):
     return model, processor
 
 
-def ask_model(model, processor, video_path, option_a, option_b):
+def process_video_inputs(messages):
     try:
         from qwen_vl_utils import process_vision_info
     except ImportError as exc:
         raise ImportError("Missing qwen_vl_utils. Install with `pip install qwen-vl-utils`.") from exc
 
+    try:
+        image_inputs, video_inputs, video_kwargs = process_vision_info(
+            messages,
+            return_video_kwargs=True,
+            return_video_metadata=True,
+        )
+    except TypeError:
+        image_inputs, video_inputs = process_vision_info(messages)
+        return image_inputs, video_inputs, {}
+
+    if video_inputs is not None and video_inputs and isinstance(video_inputs[0], tuple):
+        video_inputs, video_metadata = zip(*video_inputs)
+        video_inputs = list(video_inputs)
+        video_kwargs["video_metadata"] = list(video_metadata)
+
+    return image_inputs, video_inputs, video_kwargs
+
+
+def ask_model(model, processor, video_path, option_a, option_b):
     prompt = f"""
 Watch the video carefully.
 
@@ -110,11 +114,12 @@ Answer with only A or B.
     }]
 
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    image_inputs, video_inputs = process_vision_info(messages)
+    image_inputs, video_inputs, video_kwargs = process_video_inputs(messages)
     inputs = processor(
         text=[text],
         images=image_inputs,
         videos=video_inputs,
+        **video_kwargs,
         padding=True,
         return_tensors="pt",
     ).to(model.device)
@@ -137,19 +142,6 @@ def update_stats(bucket, key, correct):
     bucket[key]["correct"] += int(correct)
 
 
-def summarize(stats):
-    out = {}
-    for key, item in sorted(stats.items(), key=lambda kv: str(kv[0])):
-        total = item["total"]
-        correct = item["correct"]
-        out[str(key)] = {
-            "total": total,
-            "correct": correct,
-            "accuracy": correct / total if total else None,
-        }
-    return out
-
-
 def print_section(title, summary):
     print(f"\n{title}")
     for key, item in summary.items():
@@ -158,24 +150,38 @@ def print_section(title, summary):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--annotation_path", required=True)
-    parser.add_argument("--model_name", default="Qwen/Qwen2-VL-2B-Instruct")
-    parser.add_argument("--dataset_name", required=True)
-    parser.add_argument("--output_dir", default="results")
-    parser.add_argument("--max_samples", type=int, default=None)
+    parser.add_argument("--annotation_path", "--annotation-path", required=True)
+    parser.add_argument("--model_name", "--model-name", default="Qwen/Qwen2-VL-2B-Instruct")
+    parser.add_argument("--dataset_name", "--dataset-name", default=None)
+    parser.add_argument("--output_dir", "--output-dir", "--result-dir", default=str(PROJECT_ROOT / "results"))
+    parser.add_argument("--max_samples", "--max-samples", type=int, default=None)
+    parser.add_argument(
+        "--experiment_version",
+        "--experiment-version",
+        default=None,
+        help="Backward-compatible alias used as dataset_name when --dataset_name is omitted.",
+    )
+    parser.add_argument(
+        "--output_name",
+        "--output-name",
+        default="raw_results.jsonl",
+        help="Backward-compatible raw result filename option.",
+    )
     args = parser.parse_args()
 
+    dataset_name = args.dataset_name or args.experiment_version or Path(args.annotation_path).parent.name
+    dataset_slug = slugify(dataset_name)
     safe_model_name = slugify(args.model_name)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path(args.output_dir) / safe_model_name / args.dataset_name / timestamp
+    run_dir = Path(args.output_dir) / safe_model_name / dataset_slug / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_result_path = run_dir / "raw_results.jsonl"
+    raw_result_path = run_dir / args.output_name
     summary_path = run_dir / "summary.json"
     config_path = run_dir / "config.json"
 
     model, processor = load_model(args.model_name)
-    data = load_data(args.annotation_path)
+    data = read_jsonl(args.annotation_path)
     if args.max_samples is not None:
         data = data[:args.max_samples]
 
@@ -200,7 +206,7 @@ def main():
 
         result = {field: item.get(field, "") for field in KEY_FIELDS}
         result.update({
-            "dataset_name": args.dataset_name,
+            "dataset_name": dataset_name,
             "prediction": pred,
             "is_correct": correct,
             "raw_response": raw_response,
@@ -224,15 +230,13 @@ def main():
             "raw=", repr(raw_response),
         )
 
-    with open(raw_result_path, "w", encoding="utf-8") as f:
-        for result in results:
-            f.write(json.dumps(result, ensure_ascii=False) + "\n")
+    write_jsonl(raw_result_path, results)
 
     overall_correct = sum(int(r["is_correct"]) for r in results)
     overall_total = len(results)
     summary = {
         "model_name": args.model_name,
-        "dataset_name": args.dataset_name,
+        "dataset_name": dataset_name,
         "annotation_path": args.annotation_path,
         "run_dir": str(run_dir),
         "timestamp": timestamp,
@@ -241,14 +245,19 @@ def main():
             "correct": overall_correct,
             "accuracy": overall_correct / overall_total if overall_total else None,
         },
-        "by_difficulty_level": summarize(by_difficulty),
-        "by_difficulty_level_condition": summarize(by_difficulty_condition),
-        "by_condition": summarize(by_condition),
-        "by_correct_option": summarize(by_correct_option),
-        "by_prompt_variant": summarize(by_prompt_variant),
-        "by_prediction": summarize(by_prediction),
+        "by_difficulty_level": summarize_counts(by_difficulty),
+        "by_difficulty_level_condition": summarize_counts(by_difficulty_condition),
+        "by_condition": summarize_counts(by_condition),
+        "by_correct_option": summarize_counts(by_correct_option),
+        "by_prompt_variant": summarize_counts(by_prompt_variant),
+        "by_prediction": summarize_counts(by_prediction),
     }
-    config = vars(args) | {"timestamp": timestamp, "run_dir": str(run_dir)}
+    config = vars(args) | {
+        "dataset_name": dataset_name,
+        "dataset_slug": dataset_slug,
+        "timestamp": timestamp,
+        "run_dir": str(run_dir),
+    }
 
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")

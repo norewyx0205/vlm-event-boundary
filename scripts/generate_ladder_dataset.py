@@ -9,6 +9,11 @@ import cv2
 import imageio_ffmpeg
 import numpy as np
 
+try:
+    from .common import PROJECT_ROOT
+except ImportError:
+    from common import PROJECT_ROOT
+
 
 W, H = 512, 512
 CONDITIONS = ["low_boundary", "temporal_boundary", "visual_boundary", "audio_boundary"]
@@ -637,7 +642,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_version", default="ladder_v1")
     parser.add_argument("--samples_per_level", type=int, default=30)
-    parser.add_argument("--output_root", default="data/ladder_v1")
+    parser.add_argument("--output_root", default=str(PROJECT_ROOT / "data" / "ladder_v1"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fps", type=int, default=15)
     parser.add_argument("--level_durations", type=parse_durations, default=parse_durations("10,12,14,20"))

@@ -1,6 +1,10 @@
 import argparse
-import json
 from pathlib import Path
+
+try:
+    from .common import read_jsonl, write_jsonl
+except ImportError:
+    from common import read_jsonl, write_jsonl
 
 
 def make_eval_rows(row):
@@ -42,17 +46,12 @@ def main():
     output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    rows_written = 0
-    with open(input_path, "r", encoding="utf-8") as src, open(output_path, "w", encoding="utf-8") as dst:
-        for line in src:
-            if not line.strip():
-                continue
-            row = json.loads(line)
-            for eval_row in make_eval_rows(row):
-                dst.write(json.dumps(eval_row, ensure_ascii=False) + "\n")
-                rows_written += 1
+    output_rows = []
+    for row in read_jsonl(input_path):
+        output_rows.extend(make_eval_rows(row))
 
-    print(f"Wrote {rows_written} mirrored evaluation rows to {output_path}")
+    write_jsonl(output_path, output_rows)
+    print(f"Wrote {len(output_rows)} mirrored evaluation rows to {output_path}")
 
 
 if __name__ == "__main__":

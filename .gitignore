@@ -1,0 +1,21 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# macOS/editor metadata
+.DS_Store
+.idea/
+
+# Generated datasets and experiment outputs
+data/ladder_v*/
+scripts/data/
+results/
+
+# Generated legacy video datasets
+synthetic_boundary_videos/videos/
+baseline_boundary_videos/videos/
+
+# Large eval artifacts
+*.mp4
+*.wav
