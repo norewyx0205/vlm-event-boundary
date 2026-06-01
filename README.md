@@ -110,6 +110,42 @@ After generation, verify the dataset controls:
 python scripts/check_ladder_dataset.py --root data/ladder_v1
 ```
 
+## Baseline And Synthetic References
+
+The legacy generator is kept for two reference settings outside the ladder:
+
+- `baseline_boundary_videos`: very simple sanity-check cases.
+- `synthetic_boundary_videos`: harder pre-ladder synthetic cases with distractors and later unrelated motion.
+
+Generate both:
+
+```bash
+python generate_2d_boundary_videos.py --dataset all
+```
+
+Generate only one:
+
+```bash
+python generate_2d_boundary_videos.py --dataset baseline
+python generate_2d_boundary_videos.py --dataset hard
+```
+
+Evaluate them with the same Qwen runner:
+
+```bash
+python scripts/run_eval.py \
+  --annotation_path baseline_boundary_videos/annotations.jsonl \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name baseline_qwen3_sanity_check \
+  --output_dir results
+
+python scripts/run_eval.py \
+  --annotation_path synthetic_boundary_videos/annotations.jsonl \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name synthetic_qwen3_reference \
+  --output_dir results
+```
+
 ## Run Qwen Evaluation
 
 Run one level:
@@ -138,7 +174,7 @@ Quick smoke test:
 python scripts/run_eval.py \
   --annotation_path data/ladder_v1/level_1_simple/annotations.jsonl \
   --model_name Qwen/Qwen3-VL-8B-Instruct \
-  --dataset_name ladder_v1_level_1_simple_smoke \
+  --dataset_name smoke_ladder_v1_level_1_simple \
   --output_dir results \
   --max_samples 4
 ```
@@ -167,7 +203,7 @@ Analyze a directory containing multiple run folders:
 
 ```bash
 python scripts/analyze_results.py \
-  --input results/Qwen_Qwen3-VL-8B-Instruct \
+  --input results \
   --dataset_name_prefix ladder_v1_level_ \
   --output_dir analysis/ladder_v1_qwen3_all \
   --plots
@@ -216,6 +252,8 @@ Use `notebooks/colab_eval.ipynb` for Colab. It contains cells for:
 
 - cloning/pulling the repo
 - installing dependencies
+- generating baseline and synthetic reference datasets
 - generating the ladder dataset
+- running baseline, synthetic, and ladder evaluations
 - running Qwen3-VL on each level
 - analyzing saved results

@@ -19,6 +19,8 @@ def load_result_files(path):
 
 def dataset_name_from_path(path):
     parts = Path(path).parts
+    if len(parts) >= 4 and parts[-1] == "raw_results.jsonl":
+        return parts[-3]
     if len(parts) >= 3:
         return parts[-2]
     return ""
@@ -28,8 +30,6 @@ def load_rows(paths, dataset_name_prefix=None):
     rows = []
     for path in paths:
         dataset_name = dataset_name_from_path(path)
-        if dataset_name_prefix and not dataset_name.startswith(dataset_name_prefix):
-            continue
         for row in read_jsonl(path):
             row["_source_file"] = str(path)
             row.setdefault("dataset_name", dataset_name)
