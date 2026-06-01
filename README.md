@@ -226,8 +226,19 @@ The analyzer saves:
 - `prediction_distribution.csv`
 - `swap_consistency_summary.csv`
 - `swap_consistency_details.csv`
+- `swap_consistency_by_level_condition.csv`
+- `paired_boundary_summary.csv`
+- `paired_boundary_details.csv`
 - `summary.json`
 - optional `accuracy_by_difficulty_condition.png`
+
+`paired_boundary_summary.csv` compares each non-low boundary condition against `low_boundary` within the same `difficulty_level` and `base_sample_id`, reporting:
+
+- `temporal_boundary_minus_low_boundary`
+- `visual_boundary_minus_low_boundary`
+- `audio_boundary_minus_low_boundary`
+
+This is especially useful for Level 5, where aggregate accuracy can hide whether a boundary condition consistently helps or hurts the same stimuli.
 
 Swap consistency categories:
 

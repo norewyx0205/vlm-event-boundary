@@ -32,6 +32,7 @@ KEY_FIELDS = [
     "difficulty_name",
     "condition",
     "boundary_type",
+    "base_sample_id",
     "prompt_variant",
     "correct_option",
     "option_A",

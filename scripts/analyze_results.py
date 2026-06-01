@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import re
 from pathlib import Path
 from collections import defaultdict, Counter
 
@@ -65,6 +66,20 @@ def prediction_distribution(rows):
     ]
 
 
+def infer_base_sample_id(row):
+    value = row.get("base_sample_id")
+    if value not in (None, ""):
+        return str(value)
+    match = re.search(r"sample_(\d+)_", row.get("video_id", ""))
+    if match:
+        return str(int(match.group(1)))
+    return ""
+
+
+def mean(values):
+    return sum(values) / len(values) if values else None
+
+
 def swap_consistency(rows):
     by_video = defaultdict(dict)
     for row in rows:
@@ -102,6 +117,7 @@ def swap_consistency(rows):
             "source_file": source_file,
             "dataset_version": dataset_version,
             "difficulty_level": difficulty_level,
+            "difficulty_name": pair["original"].get("difficulty_name", ""),
             "condition": condition,
             "video_id": video_id,
             "category": category,
@@ -114,6 +130,99 @@ def swap_consistency(rows):
         for category, count in sorted(counts.items())
     ]
     return summary, detail_rows
+
+
+def grouped_counts(rows, keys, count_key):
+    stats = defaultdict(Counter)
+    for row in rows:
+        key = tuple(row.get(k, "") for k in keys)
+        stats[key][row.get(count_key, "")] += 1
+    out = []
+    for key, counts in sorted(stats.items(), key=lambda kv: kv[0]):
+        total = sum(counts.values())
+        base = {key_name: key_value for key_name, key_value in zip(keys, key)}
+        for category, count in sorted(counts.items()):
+            out.append({
+                **base,
+                count_key: category,
+                "count": count,
+                "proportion": count / total if total else None,
+            })
+    return out
+
+
+def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
+    by_unit = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        condition = row.get("condition", "")
+        if not condition:
+            continue
+        key = (
+            row.get("_source_file", ""),
+            row.get("dataset_name", ""),
+            row.get("dataset_version", ""),
+            str(row.get("difficulty_level", "")),
+            row.get("difficulty_name", ""),
+            infer_base_sample_id(row),
+        )
+        by_unit[key][condition].append(int(bool(row.get("is_correct", False))))
+
+    detail_rows = []
+    for key, condition_values in by_unit.items():
+        if baseline_condition not in condition_values:
+            continue
+        low_acc = mean(condition_values[baseline_condition])
+        source_file, dataset_name, dataset_version, difficulty_level, difficulty_name, base_sample_id = key
+
+        for condition, values in sorted(condition_values.items()):
+            if condition == baseline_condition:
+                continue
+            condition_acc = mean(values)
+            diff = condition_acc - low_acc
+            if diff > 0:
+                direction = "improved"
+            elif diff < 0:
+                direction = "worse"
+            else:
+                direction = "same"
+
+            detail_rows.append({
+                "source_file": source_file,
+                "dataset_name": dataset_name,
+                "dataset_version": dataset_version,
+                "difficulty_level": difficulty_level,
+                "difficulty_name": difficulty_name,
+                "base_sample_id": base_sample_id,
+                "comparison": f"{condition}_minus_{baseline_condition}",
+                "condition": condition,
+                "baseline_condition": baseline_condition,
+                "condition_accuracy": condition_acc,
+                "baseline_accuracy": low_acc,
+                "difference": diff,
+                "direction": direction,
+            })
+
+    grouped = defaultdict(list)
+    for row in detail_rows:
+        grouped[(row["difficulty_level"], row["difficulty_name"], row["comparison"])].append(row)
+
+    summary_rows = []
+    for key, items in sorted(grouped.items(), key=lambda kv: kv[0]):
+        difficulty_level, difficulty_name, comparison = key
+        differences = [item["difference"] for item in items]
+        directions = Counter(item["direction"] for item in items)
+        summary_rows.append({
+            "difficulty_level": difficulty_level,
+            "difficulty_name": difficulty_name,
+            "comparison": comparison,
+            "pairs": len(items),
+            "mean_difference": mean(differences),
+            "improved": directions.get("improved", 0),
+            "same": directions.get("same", 0),
+            "worse": directions.get("worse", 0),
+        })
+
+    return summary_rows, detail_rows
 
 
 def write_csv(path, rows):
@@ -229,6 +338,12 @@ def main():
     by_prompt_variant = grouped_accuracy(rows, ["prompt_variant"])
     pred_dist = prediction_distribution(rows)
     swap_summary, swap_details = swap_consistency(rows)
+    swap_by_level_condition = grouped_counts(
+        swap_details,
+        ["difficulty_level", "difficulty_name", "condition"],
+        "category",
+    )
+    paired_summary, paired_details = paired_boundary_comparison(rows)
 
     write_csv(output_dir / "accuracy_by_difficulty.csv", by_difficulty)
     write_csv(output_dir / "accuracy_by_difficulty_condition.csv", by_difficulty_condition)
@@ -237,6 +352,9 @@ def main():
     write_csv(output_dir / "prediction_distribution.csv", pred_dist)
     write_csv(output_dir / "swap_consistency_summary.csv", swap_summary)
     write_csv(output_dir / "swap_consistency_details.csv", swap_details)
+    write_csv(output_dir / "swap_consistency_by_level_condition.csv", swap_by_level_condition)
+    write_csv(output_dir / "paired_boundary_summary.csv", paired_summary)
+    write_csv(output_dir / "paired_boundary_details.csv", paired_details)
 
     summary = {
         "input": args.input,
@@ -249,6 +367,7 @@ def main():
         "accuracy_by_prompt_variant": by_prompt_variant,
         "prediction_distribution": pred_dist,
         "swap_consistency": swap_summary,
+        "paired_boundary_summary": paired_summary,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
