@@ -90,6 +90,7 @@ Useful generation arguments:
 ```text
 --samples_per_level
 --level_count                Number of levels to generate, default 6
+--levels                     Comma-separated specific levels to generate, e.g. 6 or 4,5,6
 --fps
 --level_durations            Comma-separated durations for generated levels, default 10,12,14,16,18,20
 --event_duration_sec

@@ -216,6 +216,21 @@ def active_levels(level_count):
     return LEVELS[:level_count]
 
 
+def parse_level_selection(value):
+    levels = []
+    for part in value.split(","):
+        level = int(part.strip())
+        if not 1 <= level <= len(LEVELS):
+            raise argparse.ArgumentTypeError(f"level must be between 1 and {len(LEVELS)}: {level}")
+        levels.append(level)
+    return levels
+
+
+def selected_levels(level_numbers):
+    level_map = {level["difficulty_level"]: level for level in LEVELS}
+    return [level_map[level_number] for level_number in level_numbers]
+
+
 def get_timing(condition, fps, duration_sec, event_duration, temporal_gap, visual_marker, include_unrelated):
     total_frames = fps * duration_sec
     start_hold = fps if duration_sec <= 10 else 2 * fps
@@ -388,8 +403,27 @@ def make_target_objects(level, first_object_id, identity_spec):
 
 
 def target_like_identity(target_objects, idx):
+    """Return a distractor identity that is target-like but not target-identical."""
     target = target_objects[idx % len(target_objects)]
-    return target["shape"], target["color"], target["id"]
+    target_pairs = {(obj["shape"], obj["color"]) for obj in target_objects}
+
+    candidates = []
+    for shape in SHAPES:
+        pair = (shape, target["color"])
+        if shape != target["shape"] and pair not in target_pairs:
+            candidates.append((shape, target["color"], "color"))
+
+    for color in COLORS:
+        pair = (target["shape"], color)
+        if color != target["color"] and pair not in target_pairs:
+            candidates.append((target["shape"], color, "shape"))
+
+    if not candidates:
+        shape, color, _ = non_target_identity(target_objects)
+        return shape, color, target["id"], "none"
+
+    shape, color, shared_attribute = random.choice(candidates)
+    return shape, color, target["id"], shared_attribute
 
 
 def non_target_identity(target_objects):
@@ -418,9 +452,10 @@ def make_distractors(level, existing, target_objects, static_distractors, moving
 
     for idx in range(static_count):
         if static_kind == "target_like":
-            shape, color, matched_target_id = target_like_identity(target_objects, idx)
+            shape, color, matched_target_id, shared_target_attribute = target_like_identity(target_objects, idx)
         else:
             shape, color, matched_target_id = non_target_identity(target_objects)
+            shared_target_attribute = "none"
 
         point = sample_point(existing)
         distractors.append({
@@ -430,14 +465,16 @@ def make_distractors(level, existing, target_objects, static_distractors, moving
             "motion_kind": "static",
             "distractor_identity": static_kind,
             "matched_target_id": matched_target_id,
+            "shared_target_attribute": shared_target_attribute,
             "path": {"direction": "none", "from": point, "to": point},
         })
 
     for idx in range(moving_count):
         if moving_kind == "target_like":
-            shape, color, matched_target_id = target_like_identity(target_objects, idx + static_count)
+            shape, color, matched_target_id, shared_target_attribute = target_like_identity(target_objects, idx + static_count)
         else:
             shape, color, matched_target_id = non_target_identity(target_objects)
+            shared_target_attribute = "none"
 
         distractors.append({
             "id": len(distractors) + 1,
@@ -446,6 +483,7 @@ def make_distractors(level, existing, target_objects, static_distractors, moving
             "motion_kind": "unrelated_motion",
             "distractor_identity": moving_kind,
             "matched_target_id": matched_target_id,
+            "shared_target_attribute": shared_target_attribute,
             "motion_timing": level["moving_distractor_timing"],
             "path": sample_path(existing),
         })
@@ -459,6 +497,7 @@ def make_distractors(level, existing, target_objects, static_distractors, moving
             "motion_kind": "unrelated_motion",
             "distractor_identity": "non_target",
             "matched_target_id": matched_target_id,
+            "shared_target_attribute": "none",
             "motion_timing": "later",
             "path": sample_path(existing),
         })
@@ -674,6 +713,7 @@ def generate_level(level, args, durations, target_identity_specs):
                         "motion_kind": d["motion_kind"],
                         "distractor_identity": d.get("distractor_identity", "unknown"),
                         "matched_target_id": d.get("matched_target_id"),
+                        "shared_target_attribute": d.get("shared_target_attribute", "none"),
                         "motion_timing": d.get("motion_timing", "none"),
                         "direction": d["path"]["direction"],
                         "from": d["path"]["from"],
@@ -727,9 +767,9 @@ def write_data_readme(args, durations, levels):
         "| Level | Name | Duration | Description |",
         "| --- | --- | ---: | --- |",
     ]
-    for level, duration in zip(levels, durations):
+    for level in levels:
         lines.append(
-            f"| {level['difficulty_level']} | `{level['difficulty_name']}` | {duration}s | {level['description']} |"
+            f"| {level['difficulty_level']} | `{level['difficulty_name']}` | {get_level_duration(level, durations)}s | {level['description']} |"
         )
     lines.extend([
         "",
@@ -754,6 +794,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_version", default="ladder_v2")
     parser.add_argument("--level_count", type=int, default=6, help="Generate the first N ladder levels.")
+    parser.add_argument("--levels", type=parse_level_selection, default=None, help="Comma-separated difficulty levels to generate, e.g. 6 or 4,5,6.")
     parser.add_argument("--samples_per_level", type=int, default=30)
     parser.add_argument("--output_root", default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -772,11 +813,12 @@ def main():
     )
     args = parser.parse_args()
 
-    levels = active_levels(args.level_count)
-    if len(args.level_durations) != len(levels):
+    levels = selected_levels(args.levels) if args.levels else active_levels(args.level_count)
+    required_duration_count = max(level["difficulty_level"] for level in levels)
+    if len(args.level_durations) < required_duration_count:
         raise SystemExit(
-            f"--level_durations must contain exactly {len(levels)} comma-separated integers "
-            f"for level_count={len(levels)}."
+            f"--level_durations must contain at least {required_duration_count} comma-separated integers "
+            f"for selected levels {[level['difficulty_level'] for level in levels]}."
         )
     if args.output_root is None:
         args.output_root = str(PROJECT_ROOT / "data" / args.dataset_version)
@@ -790,7 +832,8 @@ def main():
     for level in levels:
         generate_level(level, args, args.level_durations, target_identity_specs)
 
-    write_data_readme(args, args.level_durations, levels)
+    readme_levels = LEVELS if args.levels else levels
+    write_data_readme(args, args.level_durations, readme_levels)
 
 
 if __name__ == "__main__":

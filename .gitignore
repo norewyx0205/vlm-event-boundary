@@ -8,7 +8,7 @@ __pycache__/
 .idea/
 
 # Generated datasets and experiment outputs
-data/ladder_v*/
+#data/ladder_v*/
 scripts/data/
 results/
 
@@ -17,5 +17,5 @@ synthetic_boundary_videos/videos/
 baseline_boundary_videos/videos/
 
 # Large eval artifacts
-*.mp4
+#*.mp4
 *.wav

@@ -248,9 +248,9 @@ def make_plot(rows, output_path):
     for row in rows:
         grouped[row["condition"]].append(row)
 
-    width, height = 900, 560
-    margin_left, margin_right = 90, 40
-    margin_top, margin_bottom = 50, 80
+    width, height = 1120, 620
+    margin_left, margin_right = 95, 290
+    margin_top, margin_bottom = 85, 85
     plot_w = width - margin_left - margin_right
     plot_h = height - margin_top - margin_bottom
     image = np.ones((height, width, 3), dtype=np.uint8) * 255
@@ -283,7 +283,9 @@ def make_plot(rows, output_path):
         "audio_boundary": (148, 103, 189),
     }
 
-    legend_y = 28
+    legend_x = margin_left + plot_w + 35
+    legend_y = margin_top + 12
+    cv2.putText(image, "Boundary", (legend_x, margin_top - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
     for idx, (condition, items) in enumerate(sorted(grouped.items())):
         items = sorted(items, key=lambda x: int(x["difficulty_level"]))
         points = []
@@ -301,14 +303,14 @@ def make_plot(rows, output_path):
         for point in points:
             cv2.circle(image, point, 6, color, -1)
 
-        lx = 560
-        ly = legend_y + idx * 24
+        lx = legend_x
+        ly = legend_y + idx * 30
         cv2.line(image, (lx, ly), (lx + 30, ly), color, 3)
         cv2.putText(image, condition, (lx + 38, ly + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, axis_color, 1)
 
-    cv2.putText(image, "Accuracy by difficulty level and boundary condition", (margin_left, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, axis_color, 2)
+    cv2.putText(image, "Accuracy by difficulty level and boundary condition", (margin_left, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.75, axis_color, 2)
     cv2.putText(image, "Difficulty level", (margin_left + plot_w // 2 - 80, height - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, axis_color, 2)
-    cv2.putText(image, "Accuracy", (8, margin_top - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.65, axis_color, 2)
+    cv2.putText(image, "Accuracy", (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), image)
