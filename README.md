@@ -21,17 +21,23 @@ This counterbalances answer position and supports response-bias analysis.
 ```text
 vlm-event-boundary/
   data/
-    ladder_v1/
+    ladder_v2/
       level_1_simple/
         videos/
         annotations.jsonl
       level_2_randomized/
         videos/
         annotations.jsonl
-      level_3_static_distractors/
+      level_3_non_target_static_distractors/
         videos/
         annotations.jsonl
-      level_4_moving_distractors/
+      level_4_target_like_static_distractors/
+        videos/
+        annotations.jsonl
+      level_5_target_like_moving_distractors/
+        videos/
+        annotations.jsonl
+      level_6_hard_temporal_interference/
         videos/
         annotations.jsonl
     README.md
@@ -56,8 +62,10 @@ Legacy root scripts are kept for backwards compatibility, but new experiments sh
 | --- | --- | --- |
 | 1 | `level_1_simple` | Two target objects, no distractors, short fixed/simple videos. Sanity check. |
 | 2 | `level_2_randomized` | Randomized target positions, motion directions, and which object moves first. No distractors. |
-| 3 | `level_3_static_distractors` | Level 2 plus 1-2 static distractor objects. Tests visual object binding. |
-| 4 | `level_4_moving_distractors` | Level 2 plus static/moving distractors and a later unrelated motion event. Hard setting. |
+| 3 | `level_3_non_target_static_distractors` | Static distractors with colors/shapes distinct from the targets. |
+| 4 | `level_4_target_like_static_distractors` | Static distractors share target colors/shapes. Tests target binding. |
+| 5 | `level_5_target_like_moving_distractors` | Moving distractors share target colors/shapes and move near target events. |
+| 6 | `level_6_hard_temporal_interference` | Target-like moving distractors near the boundary plus a later unrelated event. |
 
 All levels include four boundary conditions:
 
@@ -72,9 +80,8 @@ Default generation:
 
 ```bash
 python scripts/generate_ladder_dataset.py \
-  --dataset_version ladder_v1 \
+  --dataset_version ladder_v2 \
   --samples_per_level 30 \
-  --output_root data/ladder_v1 \
   --seed 42
 ```
 
@@ -82,8 +89,9 @@ Useful generation arguments:
 
 ```text
 --samples_per_level
+--level_count                Number of levels to generate, default 6
 --fps
---level_durations          Comma-separated durations for levels 1-4, default 10,12,14,20
+--level_durations            Comma-separated durations for generated levels, default 10,12,14,16,18,20
 --event_duration_sec
 --temporal_gap_sec
 --visual_marker_sec
@@ -102,12 +110,12 @@ level_2_sample_001_low_boundary_original
 level_2_sample_001_low_boundary_swapped
 ```
 
-For a fixed `base_sample_id`, the two target objects keep the same color and shape across all four difficulty levels and all four boundary conditions. Across levels, only the difficulty manipulation changes: motion path, target order, distractors, and temporal complexity.
+For a fixed `base_sample_id`, the two target objects keep the same color and shape across all difficulty levels and all four boundary conditions. Across levels, only the difficulty manipulation changes: motion path, target order, distractors, and temporal complexity.
 
 After generation, verify the dataset controls:
 
 ```bash
-python scripts/check_ladder_dataset.py --root data/ladder_v1
+python scripts/check_ladder_dataset.py --root data/ladder_v2
 ```
 
 ## Baseline And Synthetic References
@@ -152,9 +160,9 @@ Run one level:
 
 ```bash
 python scripts/run_eval.py \
-  --annotation_path data/ladder_v1/level_1_simple/annotations.jsonl \
+  --annotation_path data/ladder_v2/level_1_simple/annotations.jsonl \
   --model_name Qwen/Qwen2-VL-2B-Instruct \
-  --dataset_name ladder_v1_level_1_simple \
+  --dataset_name ladder_v2_level_1_simple \
   --output_dir results
 ```
 
@@ -162,9 +170,9 @@ Run Qwen3-VL:
 
 ```bash
 python scripts/run_eval.py \
-  --annotation_path data/ladder_v1/level_4_moving_distractors/annotations.jsonl \
+  --annotation_path data/ladder_v2/level_5_target_like_moving_distractors/annotations.jsonl \
   --model_name Qwen/Qwen3-VL-8B-Instruct \
-  --dataset_name ladder_v1_level_4_moving_distractors \
+  --dataset_name ladder_v2_level_5_target_like_moving_distractors \
   --output_dir results
 ```
 
@@ -172,9 +180,9 @@ Quick smoke test:
 
 ```bash
 python scripts/run_eval.py \
-  --annotation_path data/ladder_v1/level_1_simple/annotations.jsonl \
+  --annotation_path data/ladder_v2/level_1_simple/annotations.jsonl \
   --model_name Qwen/Qwen3-VL-8B-Instruct \
-  --dataset_name smoke_ladder_v1_level_1_simple \
+  --dataset_name smoke_ladder_v2_level_1_simple \
   --output_dir results \
   --max_samples 4
 ```
@@ -194,8 +202,8 @@ Analyze a single run:
 
 ```bash
 python scripts/analyze_results.py \
-  --input results/Qwen_Qwen3-VL-8B-Instruct/ladder_v1_level_4_moving_distractors/<timestamp>/raw_results.jsonl \
-  --output_dir analysis/ladder_v1_qwen3_level4 \
+  --input results/Qwen_Qwen3-VL-8B-Instruct/ladder_v2_level_5_target_like_moving_distractors/<timestamp>/raw_results.jsonl \
+  --output_dir analysis/ladder_v2_qwen3_level5 \
   --plots
 ```
 
@@ -204,8 +212,8 @@ Analyze a directory containing multiple run folders:
 ```bash
 python scripts/analyze_results.py \
   --input results \
-  --dataset_name_prefix ladder_v1_level_ \
-  --output_dir analysis/ladder_v1_qwen3_all \
+  --dataset_name_prefix ladder_v2_level_ \
+  --output_dir analysis/ladder_v2_qwen3_all \
   --plots
 ```
 

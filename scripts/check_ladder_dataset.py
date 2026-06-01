@@ -92,6 +92,14 @@ def main():
         print(f"  first_object_ids: {dict(Counter(row['first_object_id'] for row in level_rows))}")
         print(f"  static_distractors: {dict(Counter(row['static_distractor_count'] for row in level_rows))}")
         print(f"  moving_distractors: {dict(Counter(row['moving_distractor_count'] for row in level_rows))}")
+        print(
+            "  distractor_identity:",
+            dict(Counter(d.get("distractor_identity", "none") for row in level_rows for d in row.get("distractors", []))),
+        )
+        print(
+            "  moving_timing:",
+            dict(Counter(d.get("motion_timing", "none") for row in level_rows for d in row.get("distractors", []))),
+        )
 
     if bad_video_pairs or bad_base_identity or bad_base_condition_identity:
         raise SystemExit(1)

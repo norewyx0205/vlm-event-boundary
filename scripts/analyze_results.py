@@ -150,8 +150,15 @@ def make_plot(rows, output_path):
     cv2.line(image, (margin_left, margin_top), (margin_left, margin_top + plot_h), axis_color, 2)
     cv2.line(image, (margin_left, margin_top + plot_h), (margin_left + plot_w, margin_top + plot_h), axis_color, 2)
 
-    for level in [1, 2, 3, 4]:
-        x = margin_left + round((level - 1) / 3 * plot_w)
+    level_values = sorted({int(row["difficulty_level"]) for row in rows if str(row.get("difficulty_level", "")).isdigit()})
+    if not level_values:
+        level_values = [1]
+    min_level = min(level_values)
+    max_level = max(level_values)
+    level_span = max(1, max_level - min_level)
+
+    for level in level_values:
+        x = margin_left + round((level - min_level) / level_span * plot_w)
         cv2.line(image, (x, margin_top + plot_h), (x, margin_top + plot_h + 6), axis_color, 1)
         cv2.putText(image, str(level), (x - 6, margin_top + plot_h + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, axis_color, 2)
 
@@ -176,7 +183,7 @@ def make_plot(rows, output_path):
         for item in items:
             level = int(item["difficulty_level"])
             acc = float(item["accuracy"])
-            x = margin_left + round((level - 1) / 3 * plot_w)
+            x = margin_left + round((level - min_level) / level_span * plot_w)
             y = margin_top + plot_h - round(acc * plot_h)
             points.append((x, y))
 

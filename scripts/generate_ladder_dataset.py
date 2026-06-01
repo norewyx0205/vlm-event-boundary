@@ -32,33 +32,61 @@ LEVELS = [
     {
         "difficulty_level": 1,
         "difficulty_name": "level_1_simple",
+        "description": "fixed two targets, no distractors",
         "randomized_targets": False,
-        "static_distractors": False,
-        "moving_distractors": False,
+        "static_distractor_kind": "none",
+        "moving_distractor_kind": "none",
+        "moving_distractor_timing": "none",
         "include_unrelated_later_motion": False,
     },
     {
         "difficulty_level": 2,
         "difficulty_name": "level_2_randomized",
+        "description": "random target positions, directions, and order",
         "randomized_targets": True,
-        "static_distractors": False,
-        "moving_distractors": False,
+        "static_distractor_kind": "none",
+        "moving_distractor_kind": "none",
+        "moving_distractor_timing": "none",
         "include_unrelated_later_motion": False,
     },
     {
         "difficulty_level": 3,
-        "difficulty_name": "level_3_static_distractors",
+        "difficulty_name": "level_3_non_target_static_distractors",
+        "description": "static distractors with colors/shapes distinct from targets",
         "randomized_targets": True,
-        "static_distractors": True,
-        "moving_distractors": False,
+        "static_distractor_kind": "non_target",
+        "moving_distractor_kind": "none",
+        "moving_distractor_timing": "none",
         "include_unrelated_later_motion": False,
     },
     {
         "difficulty_level": 4,
-        "difficulty_name": "level_4_moving_distractors",
+        "difficulty_name": "level_4_target_like_static_distractors",
+        "description": "static distractors sharing color/shape with targets",
         "randomized_targets": True,
-        "static_distractors": True,
-        "moving_distractors": True,
+        "static_distractor_kind": "target_like",
+        "moving_distractor_kind": "none",
+        "moving_distractor_timing": "none",
+        "include_unrelated_later_motion": False,
+    },
+    {
+        "difficulty_level": 5,
+        "difficulty_name": "level_5_target_like_moving_distractors",
+        "description": "moving distractors sharing color/shape with targets near target events",
+        "randomized_targets": True,
+        "static_distractor_kind": "target_like",
+        "moving_distractor_kind": "target_like",
+        "moving_distractor_timing": "near_targets",
+        "include_unrelated_later_motion": False,
+    },
+    {
+        "difficulty_level": 6,
+        "difficulty_name": "level_6_hard_temporal_interference",
+        "description": "target-like moving distractors near boundary plus unrelated later motion",
+        "randomized_targets": True,
+        "static_distractor_kind": "target_like",
+        "moving_distractor_kind": "target_like",
+        "moving_distractor_timing": "near_boundary",
         "include_unrelated_later_motion": True,
     },
 ]
@@ -173,6 +201,12 @@ def make_static_motion(point):
 
 def get_level_duration(level, durations):
     return durations[level["difficulty_level"] - 1]
+
+
+def active_levels(level_count):
+    if not 1 <= level_count <= len(LEVELS):
+        raise ValueError(f"--level_count must be between 1 and {len(LEVELS)}.")
+    return LEVELS[:level_count]
 
 
 def get_timing(condition, fps, duration_sec, event_duration, temporal_gap, visual_marker, include_unrelated):
@@ -346,43 +380,118 @@ def make_target_objects(level, first_object_id, identity_spec):
     return object_1, object_2, first_object_id, existing
 
 
-def make_distractors(level, existing, target_colors, static_distractors, moving_distractors):
-    distractors = []
-    distractor_colors = [color for color in COLORS if color not in target_colors] or list(COLORS)
+def target_like_identity(target_objects, idx):
+    target = target_objects[idx % len(target_objects)]
+    return target["shape"], target["color"], target["id"]
 
-    static_count = random.randint(1, static_distractors) if level["static_distractors"] and static_distractors else 0
-    moving_count = random.randint(1, moving_distractors) if level["moving_distractors"] and moving_distractors else 0
+
+def non_target_identity(target_objects):
+    target_pairs = {(obj["shape"], obj["color"]) for obj in target_objects}
+    target_colors = {obj["color"] for obj in target_objects}
+    color_pool = [color for color in COLORS if color not in target_colors] or list(COLORS)
+
+    for _ in range(100):
+        shape = random.choice(SHAPES)
+        color = random.choice(color_pool)
+        if (shape, color) not in target_pairs:
+            return shape, color, None
+
+    shape = random.choice(SHAPES)
+    color = random.choice(color_pool)
+    return shape, color, None
+
+
+def make_distractors(level, existing, target_objects, static_distractors, moving_distractors, include_unrelated_later):
+    distractors = []
+
+    static_kind = level["static_distractor_kind"]
+    moving_kind = level["moving_distractor_kind"]
+    static_count = random.randint(1, static_distractors) if static_kind != "none" and static_distractors else 0
+    moving_count = random.randint(1, moving_distractors) if moving_kind != "none" and moving_distractors else 0
 
     for idx in range(static_count):
+        if static_kind == "target_like":
+            shape, color, matched_target_id = target_like_identity(target_objects, idx)
+        else:
+            shape, color, matched_target_id = non_target_identity(target_objects)
+
         point = sample_point(existing)
         distractors.append({
             "id": len(distractors) + 1,
-            "shape": random.choice(SHAPES),
-            "color": random.choice(distractor_colors),
+            "shape": shape,
+            "color": color,
             "motion_kind": "static",
+            "distractor_identity": static_kind,
+            "matched_target_id": matched_target_id,
             "path": {"direction": "none", "from": point, "to": point},
         })
 
     for idx in range(moving_count):
+        if moving_kind == "target_like":
+            shape, color, matched_target_id = target_like_identity(target_objects, idx + static_count)
+        else:
+            shape, color, matched_target_id = non_target_identity(target_objects)
+
         distractors.append({
             "id": len(distractors) + 1,
-            "shape": random.choice(SHAPES),
-            "color": random.choice(distractor_colors),
+            "shape": shape,
+            "color": color,
             "motion_kind": "unrelated_motion",
+            "distractor_identity": moving_kind,
+            "matched_target_id": matched_target_id,
+            "motion_timing": level["moving_distractor_timing"],
+            "path": sample_path(existing),
+        })
+
+    if include_unrelated_later:
+        shape, color, matched_target_id = non_target_identity(target_objects)
+        distractors.append({
+            "id": len(distractors) + 1,
+            "shape": shape,
+            "color": color,
+            "motion_kind": "unrelated_motion",
+            "distractor_identity": "non_target",
+            "matched_target_id": matched_target_id,
+            "motion_timing": "later",
             "path": sample_path(existing),
         })
 
     return distractors
 
 
-def timed_distractors(distractors, timing):
-    timed = []
+def moving_distractor_window(distractor, timing):
+    event_duration = timing["first_event_end_frame"] - timing["first_event_start_frame"]
+    motion_timing = distractor.get("motion_timing", "later")
+
+    if motion_timing == "near_targets":
+        if distractor["id"] % 2 == 0:
+            start = timing["first_event_start_frame"]
+        else:
+            start = timing["second_event_start_frame"]
+        return start, start + event_duration
+
+    if motion_timing == "near_boundary":
+        start = max(0, timing["boundary_start_frame"] - event_duration // 2)
+        end = min(timing["total_frames"] - 1, start + event_duration)
+        return start, end
+
     unrelated_start = timing["unrelated_event_start_frame"]
     unrelated_end = timing["unrelated_event_end_frame"]
+    if unrelated_start is not None and unrelated_end is not None:
+        return unrelated_start, unrelated_end
+
+    start = timing["second_event_end_frame"] + max(1, event_duration // 2)
+    end = min(timing["total_frames"] - 1, start + event_duration)
+    return start, end
+
+
+def timed_distractors(distractors, timing):
+    timed = []
 
     for distractor in distractors:
-        if distractor["motion_kind"] == "unrelated_motion" and unrelated_end is not None:
-            motion = make_motion(distractor["path"], unrelated_start, unrelated_end)
+        if distractor["motion_kind"] == "unrelated_motion":
+            start, end = moving_distractor_window(distractor, timing)
+            motion = make_motion(distractor["path"], start, end)
         else:
             motion = make_static_motion(distractor["path"]["from"])
 
@@ -481,9 +590,10 @@ def generate_level(level, args, durations, target_identity_specs):
         distractors = make_distractors(
             level,
             existing,
-            [object_1["color"], object_2["color"]],
+            [object_1, object_2],
             args.static_distractors,
             args.moving_distractors,
+            level["include_unrelated_later_motion"] and not args.disable_unrelated_later_motion,
         )
 
         for condition in CONDITIONS:
@@ -555,6 +665,9 @@ def generate_level(level, args, durations, target_identity_specs):
                         "color": d["color"],
                         "label": f"the {d['color']} {d['shape']}",
                         "motion_kind": d["motion_kind"],
+                        "distractor_identity": d.get("distractor_identity", "unknown"),
+                        "matched_target_id": d.get("matched_target_id"),
+                        "motion_timing": d.get("motion_timing", "none"),
                         "direction": d["path"]["direction"],
                         "from": d["path"]["from"],
                         "to": d["path"]["to"],
@@ -594,7 +707,7 @@ def generate_level(level, args, durations, target_identity_specs):
     print(f"{level['difficulty_name']}: wrote {len(all_rows)} eval rows to {annotation_path}")
 
 
-def write_data_readme(args, durations):
+def write_data_readme(args, durations, levels):
     output_root = Path(args.output_root)
     readme = output_root.parent / "README.md"
     lines = [
@@ -607,15 +720,9 @@ def write_data_readme(args, durations):
         "| Level | Name | Duration | Description |",
         "| --- | --- | ---: | --- |",
     ]
-    descriptions = {
-        1: "simple two-target baseline with no distractors",
-        2: "randomized target positions, directions, and order",
-        3: "randomized targets plus static distractors",
-        4: "randomized targets plus static/moving distractors and later unrelated motion",
-    }
-    for level, duration in zip(LEVELS, durations):
+    for level, duration in zip(levels, durations):
         lines.append(
-            f"| {level['difficulty_level']} | `{level['difficulty_name']}` | {duration}s | {descriptions[level['difficulty_level']]} |"
+            f"| {level['difficulty_level']} | `{level['difficulty_name']}` | {duration}s | {level['description']} |"
         )
     lines.extend([
         "",
@@ -633,31 +740,39 @@ def write_data_readme(args, durations):
 
 def parse_durations(value):
     durations = [int(part.strip()) for part in value.split(",")]
-    if len(durations) != 4:
-        raise argparse.ArgumentTypeError("--level_durations must contain exactly four comma-separated integers.")
     return durations
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset_version", default="ladder_v1")
+    parser.add_argument("--dataset_version", default="ladder_v2")
+    parser.add_argument("--level_count", type=int, default=6, help="Generate the first N ladder levels.")
     parser.add_argument("--samples_per_level", type=int, default=30)
-    parser.add_argument("--output_root", default=str(PROJECT_ROOT / "data" / "ladder_v1"))
+    parser.add_argument("--output_root", default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fps", type=int, default=15)
-    parser.add_argument("--level_durations", type=parse_durations, default=parse_durations("10,12,14,20"))
+    parser.add_argument("--level_durations", type=parse_durations, default=parse_durations("10,12,14,16,18,20"))
     parser.add_argument("--event_duration_sec", type=float, default=2.0)
     parser.add_argument("--temporal_gap_sec", type=float, default=3.0)
     parser.add_argument("--visual_marker_sec", type=float, default=1.0)
     parser.add_argument("--audio_beep_duration_sec", type=float, default=0.35)
     parser.add_argument("--static_distractors", type=int, default=2)
-    parser.add_argument("--moving_distractors", type=int, default=1)
+    parser.add_argument("--moving_distractors", type=int, default=2)
     parser.add_argument(
         "--disable_unrelated_later_motion",
         action="store_true",
-        help="Disable the later unrelated motion event in level 4.",
+        help="Disable the later unrelated motion event in levels that include it.",
     )
     args = parser.parse_args()
+
+    levels = active_levels(args.level_count)
+    if len(args.level_durations) != len(levels):
+        raise SystemExit(
+            f"--level_durations must contain exactly {len(levels)} comma-separated integers "
+            f"for level_count={len(levels)}."
+        )
+    if args.output_root is None:
+        args.output_root = str(PROJECT_ROOT / "data" / args.dataset_version)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -665,10 +780,10 @@ def main():
 
     target_identity_specs = make_target_identity_specs(args.samples_per_level)
 
-    for level in LEVELS:
+    for level in levels:
         generate_level(level, args, args.level_durations, target_identity_specs)
 
-    write_data_readme(args, args.level_durations)
+    write_data_readme(args, args.level_durations, levels)
 
 
 if __name__ == "__main__":
