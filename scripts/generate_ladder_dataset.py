@@ -617,6 +617,7 @@ def generate_level(level, args, durations, target_identity_specs):
     temporal_gap = int(args.temporal_gap_sec * args.fps)
     visual_marker = int(args.visual_marker_sec * args.fps)
     all_rows = []
+    expected_video_names = set()
     first_object_ids = balanced_binary_sequence(1, 2, args.samples_per_level)
     correct_relations = balanced_binary_sequence("before", "after", args.samples_per_level)
 
@@ -668,6 +669,7 @@ def generate_level(level, args, durations, target_identity_specs):
             timed_dist = timed_distractors(distractors, timing)
             stem = f"level_{level['difficulty_level']}_sample_{base_id:03d}_{condition}"
             final_video = video_dir / f"{stem}.mp4"
+            expected_video_names.add(final_video.name)
 
             if condition == "audio_boundary":
                 silent_video = video_dir / f"{stem}_silent.mp4"
@@ -746,6 +748,10 @@ def generate_level(level, args, durations, target_identity_specs):
             }
 
             all_rows.extend(make_eval_rows(video_annotation))
+
+    for stale in video_dir.glob("*.mp4"):
+        if stale.name not in expected_video_names:
+            stale.unlink()
 
     with open(annotation_path, "w", encoding="utf-8") as f:
         for row in all_rows:
