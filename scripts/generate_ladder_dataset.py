@@ -132,41 +132,48 @@ def far_enough(point, existing, min_dist=85):
     return all(distance(point, other) >= min_dist for other in existing)
 
 
+def relaxed_distances(min_dist):
+    values = [min_dist, 70, 55, 40, 30]
+    return [value for idx, value in enumerate(values) if value > 0 and value not in values[:idx]]
+
+
 def sample_point(existing, margin=70, min_dist=85):
-    for _ in range(250):
-        point = (random.randint(margin, W - margin), random.randint(margin, H - margin))
-        if far_enough(point, existing, min_dist):
-            existing.append(point)
-            return point
+    for current_min_dist in relaxed_distances(min_dist):
+        for _ in range(300):
+            point = (random.randint(margin, W - margin), random.randint(margin, H - margin))
+            if far_enough(point, existing, current_min_dist):
+                existing.append(point)
+                return point
     raise RuntimeError("Could not sample a non-overlapping point.")
 
 
-def sample_path(existing, randomized=True):
+def sample_path(existing, randomized=True, min_dist=85):
     if not randomized:
         raise ValueError("sample_path(randomized=False) should not be used.")
 
     margin = 70
-    distance_px = random.randint(105, 165)
 
-    for _ in range(250):
-        direction = random.choice(DIRECTIONS)
+    for current_min_dist in relaxed_distances(min_dist):
+        for _ in range(300):
+            distance_px = random.randint(90, 165)
+            direction = random.choice(DIRECTIONS)
 
-        if direction == "right":
-            start = (random.randint(margin, W - margin - distance_px), random.randint(margin, H - margin))
-            end = (start[0] + distance_px, start[1])
-        elif direction == "left":
-            start = (random.randint(margin + distance_px, W - margin), random.randint(margin, H - margin))
-            end = (start[0] - distance_px, start[1])
-        elif direction == "down":
-            start = (random.randint(margin, W - margin), random.randint(margin, H - margin - distance_px))
-            end = (start[0], start[1] + distance_px)
-        else:
-            start = (random.randint(margin, W - margin), random.randint(margin + distance_px, H - margin))
-            end = (start[0], start[1] - distance_px)
+            if direction == "right":
+                start = (random.randint(margin, W - margin - distance_px), random.randint(margin, H - margin))
+                end = (start[0] + distance_px, start[1])
+            elif direction == "left":
+                start = (random.randint(margin + distance_px, W - margin), random.randint(margin, H - margin))
+                end = (start[0] - distance_px, start[1])
+            elif direction == "down":
+                start = (random.randint(margin, W - margin), random.randint(margin, H - margin - distance_px))
+                end = (start[0], start[1] + distance_px)
+            else:
+                start = (random.randint(margin, W - margin), random.randint(margin + distance_px, H - margin))
+                end = (start[0], start[1] - distance_px)
 
-        if far_enough(start, existing) and far_enough(end, existing):
-            existing.extend([start, end])
-            return {"direction": direction, "from": start, "to": end}
+            if far_enough(start, existing, current_min_dist) and far_enough(end, existing, current_min_dist):
+                existing.extend([start, end])
+                return {"direction": direction, "from": start, "to": end}
 
     raise RuntimeError("Could not sample a non-overlapping path.")
 
