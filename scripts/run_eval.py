@@ -115,7 +115,7 @@ def process_video_inputs(messages):
     return image_inputs, video_inputs, video_kwargs
 
 
-def ask_model(model, processor, video_path, option_a, option_b, video_fps, video_max_pixels):
+def ask_model(model, processor, video_path, option_a, option_b, video_fps=None, video_max_pixels=None):
     prompt = f"""
 Watch the video carefully.
 
@@ -127,15 +127,19 @@ B: {option_b}
 Answer with only A or B.
 """.strip()
 
+    video_content = {
+        "type": "video",
+        "video": video_path,
+    }
+    if video_fps is not None:
+        video_content["fps"] = video_fps
+    if video_max_pixels is not None:
+        video_content["max_pixels"] = video_max_pixels
+
     messages = [{
         "role": "user",
         "content": [
-            {
-                "type": "video",
-                "video": video_path,
-                "fps": video_fps,
-                "max_pixels": video_max_pixels,
-            },
+            video_content,
             {"type": "text", "text": prompt},
         ],
     }]
@@ -190,15 +194,15 @@ def main():
         "--video_fps",
         "--video-fps",
         type=float,
-        default=1.0,
-        help="Frames sampled per second from each video. Lower values reduce GPU memory use.",
+        default=None,
+        help="Optional frames sampled per second from each video. Lower values reduce GPU memory use.",
     )
     parser.add_argument(
         "--video_max_pixels",
         "--video-max-pixels",
         type=int,
-        default=150000,
-        help="Maximum pixels per sampled video frame. Lower values reduce visual tokens and GPU memory use.",
+        default=None,
+        help="Optional maximum pixels per sampled video frame. Lower values reduce visual tokens and GPU memory use.",
     )
     parser.add_argument(
         "--load_in_4bit",
