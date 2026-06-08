@@ -1,0 +1,25 @@
+{
+  "dataset_version": "l5_feature_ablation_v1",
+  "samples_per_variant": 30,
+  "seed": 42,
+  "fps": 15,
+  "level_durations": [
+    10,
+    12,
+    14,
+    16,
+    18,
+    20
+  ],
+  "event_duration_sec": 2.0,
+  "temporal_gap_sec": 3.0,
+  "visual_marker_sec": 1.0,
+  "audio_beep_duration_sec": 0.35,
+  "static_distractors": 2,
+  "moving_distractors": 2,
+  "variants": [
+    "full",
+    "shape_only",
+    "color_only"
+  ]
+}

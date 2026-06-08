@@ -25,8 +25,10 @@ COLORS = {
     "purple": (180, 0, 180),
     "orange": (0, 140, 255),
 }
+DRAW_COLORS = {**COLORS, "black": (0, 0, 0)}
 SHAPES = ["circle", "square", "triangle"]
 DIRECTIONS = ["right", "left", "down", "up"]
+FEATURE_VARIANTS = ("full", "shape_only", "color_only")
 
 LEVELS = [
     {
@@ -93,7 +95,7 @@ LEVELS = [
 
 
 def draw_shape(frame, shape, color_name, x, y, size=28):
-    color = COLORS[color_name]
+    color = DRAW_COLORS[color_name]
     x, y = int(x), int(y)
 
     if shape == "circle":
@@ -402,6 +404,26 @@ def make_target_objects(level, first_object_id, identity_spec):
     return object_1, object_2, first_object_id, existing
 
 
+def apply_feature_variant(identity_spec, feature_variant):
+    if feature_variant == "full":
+        return identity_spec
+
+    transformed = {
+        "base_sample_id": identity_spec["base_sample_id"],
+        "object_1": dict(identity_spec["object_1"]),
+        "object_2": dict(identity_spec["object_2"]),
+    }
+    if feature_variant == "shape_only":
+        transformed["object_1"]["color"] = "black"
+        transformed["object_2"]["color"] = "black"
+    elif feature_variant == "color_only":
+        transformed["object_1"]["shape"] = "circle"
+        transformed["object_2"]["shape"] = "circle"
+    else:
+        raise ValueError(f"Unknown feature variant: {feature_variant}")
+    return transformed
+
+
 def target_like_identity(target_objects, idx):
     """Return a distractor identity that is target-like but not target-identical."""
     target = target_objects[idx % len(target_objects)]
@@ -426,6 +448,24 @@ def target_like_identity(target_objects, idx):
     return shape, color, target["id"], shared_attribute
 
 
+def feature_ablation_distractor_identity(target_objects, idx, feature_variant):
+    target = target_objects[idx % len(target_objects)]
+
+    if feature_variant == "shape_only":
+        target_shapes = {obj["shape"] for obj in target_objects}
+        available_shapes = [shape for shape in SHAPES if shape not in target_shapes]
+        shape = random.choice(available_shapes)
+        return shape, "black", target["id"], "color"
+
+    if feature_variant == "color_only":
+        target_colors = {obj["color"] for obj in target_objects}
+        available_colors = [color for color in COLORS if color not in target_colors]
+        color = random.choice(available_colors)
+        return "circle", color, target["id"], "shape"
+
+    return target_like_identity(target_objects, idx)
+
+
 def non_target_identity(target_objects):
     target_pairs = {(obj["shape"], obj["color"]) for obj in target_objects}
     target_colors = {obj["color"] for obj in target_objects}
@@ -442,7 +482,16 @@ def non_target_identity(target_objects):
     return shape, color, None
 
 
-def make_distractors(level, existing, target_objects, static_distractors, moving_distractors, include_unrelated_later):
+def make_distractors(
+    level,
+    existing,
+    target_objects,
+    static_distractors,
+    moving_distractors,
+    include_unrelated_later,
+    feature_variant="full",
+    preserve_structure_rng=False,
+):
     distractors = []
 
     static_kind = level["static_distractor_kind"]
@@ -450,9 +499,17 @@ def make_distractors(level, existing, target_objects, static_distractors, moving
     static_count = random.randint(1, static_distractors) if static_kind != "none" and static_distractors else 0
     moving_count = random.randint(1, moving_distractors) if moving_kind != "none" and moving_distractors else 0
 
+    def choose_target_like_identity(idx):
+        if not preserve_structure_rng:
+            return feature_ablation_distractor_identity(target_objects, idx, feature_variant)
+        structural_state = random.getstate()
+        identity = feature_ablation_distractor_identity(target_objects, idx, feature_variant)
+        random.setstate(structural_state)
+        return identity
+
     for idx in range(static_count):
         if static_kind == "target_like":
-            shape, color, matched_target_id, shared_target_attribute = target_like_identity(target_objects, idx)
+            shape, color, matched_target_id, shared_target_attribute = choose_target_like_identity(idx)
         else:
             shape, color, matched_target_id = non_target_identity(target_objects)
             shared_target_attribute = "none"
@@ -471,7 +528,7 @@ def make_distractors(level, existing, target_objects, static_distractors, moving
 
     for idx in range(moving_count):
         if moving_kind == "target_like":
-            shape, color, matched_target_id, shared_target_attribute = target_like_identity(target_objects, idx + static_count)
+            shape, color, matched_target_id, shared_target_attribute = choose_target_like_identity(idx + static_count)
         else:
             shape, color, matched_target_id = non_target_identity(target_objects)
             shared_target_attribute = "none"
@@ -618,12 +675,15 @@ def generate_level(level, args, durations, target_identity_specs):
     visual_marker = int(args.visual_marker_sec * args.fps)
     all_rows = []
     expected_video_names = set()
+    feature_variant = getattr(args, "feature_variant", "full")
+    if feature_variant not in FEATURE_VARIANTS:
+        raise ValueError(f"Unknown feature variant: {feature_variant}")
     first_object_ids = balanced_binary_sequence(1, 2, args.samples_per_level)
     correct_relations = balanced_binary_sequence("before", "after", args.samples_per_level)
 
     for base_id in range(1, args.samples_per_level + 1):
         first_object_id = first_object_ids[base_id - 1] if level["randomized_targets"] else 1
-        identity_spec = target_identity_specs[base_id - 1]
+        identity_spec = apply_feature_variant(target_identity_specs[base_id - 1], feature_variant)
         object_1, object_2, first_object_id, existing = make_target_objects(level, first_object_id, identity_spec)
         second_object_id = 2 if first_object_id == 1 else 1
         first_obj = object_1 if first_object_id == 1 else object_2
@@ -641,6 +701,8 @@ def generate_level(level, args, durations, target_identity_specs):
             args.static_distractors,
             args.moving_distractors,
             level["include_unrelated_later_motion"] and not args.disable_unrelated_later_motion,
+            feature_variant=feature_variant,
+            preserve_structure_rng=getattr(args, "paired_feature_ablation", False),
         )
 
         for condition in CONDITIONS:
@@ -667,7 +729,8 @@ def generate_level(level, args, durations, target_identity_specs):
                 {**object_2, "motion": make_motion(object_2["path"], obj_2_start, obj_2_end)},
             ]
             timed_dist = timed_distractors(distractors, timing)
-            stem = f"level_{level['difficulty_level']}_sample_{base_id:03d}_{condition}"
+            sample_prefix = level.get("sample_prefix", f"level_{level['difficulty_level']}")
+            stem = f"{sample_prefix}_sample_{base_id:03d}_{condition}"
             final_video = video_dir / f"{stem}.mp4"
             expected_video_names.add(final_video.name)
 
@@ -689,9 +752,16 @@ def generate_level(level, args, durations, target_identity_specs):
                 "dataset_version": args.dataset_version,
                 "difficulty_level": level["difficulty_level"],
                 "difficulty_name": level["difficulty_name"],
+                "feature_variant": feature_variant,
+                "feature_encoding": {
+                    "full": "color_shape_conjunction",
+                    "shape_only": "shape",
+                    "color_only": "color",
+                }[feature_variant],
                 "condition": condition,
                 "boundary_type": condition.replace("_boundary", ""),
                 "base_sample_id": base_id,
+                "pairing_id": f"l5_feature_sample_{base_id:03d}_{condition}" if level["difficulty_level"] == 5 else "",
                 "video_id": final_video.name,
                 "video_path": str(final_video),
                 "eval_id_base": stem,
@@ -801,6 +871,7 @@ def main():
     parser.add_argument("--dataset_version", default="ladder_v2")
     parser.add_argument("--level_count", type=int, default=6, help="Generate the first N ladder levels.")
     parser.add_argument("--levels", type=parse_level_selection, default=None, help="Comma-separated difficulty levels to generate, e.g. 6 or 4,5,6.")
+    parser.add_argument("--feature_variant", choices=FEATURE_VARIANTS, default="full")
     parser.add_argument("--samples_per_level", type=int, default=30)
     parser.add_argument("--output_root", default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -838,7 +909,11 @@ def main():
     for level in levels:
         generate_level(level, args, args.level_durations, target_identity_specs)
 
-    readme_levels = LEVELS if args.levels else levels
+    readme_levels = (
+        [level for level in LEVELS if level["difficulty_level"] <= len(args.level_durations)]
+        if args.levels
+        else levels
+    )
     write_data_readme(args, args.level_durations, readme_levels)
 
 

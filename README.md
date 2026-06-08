@@ -119,6 +119,52 @@ After generation, verify the dataset controls:
 python scripts/check_ladder_dataset.py --root data/ladder_v2
 ```
 
+## Level 5 Feature Ablation
+
+Generate the structurally paired Level 5 pilot:
+
+```bash
+python scripts/generate_l5_feature_ablation.py \
+  --dataset_version l5_feature_ablation_v1 \
+  --samples_per_variant 30 \
+  --output_root data/l5_feature_ablation_v1 \
+  --seed 42
+```
+
+The variants are `L5_full`, `L5_shape_only`, and `L5_color_only`. They share motion paths, event order, distractor timing, and boundary timing; only the visual feature encoding changes.
+
+Validate the pilot:
+
+```bash
+python scripts/check_l5_feature_ablation.py \
+  --root data/l5_feature_ablation_v1
+```
+
+Evaluate all variants:
+
+```bash
+for variant in L5_full L5_shape_only L5_color_only; do
+  python scripts/run_eval.py \
+    --annotation_path "data/l5_feature_ablation_v1/$variant/annotations.jsonl" \
+    --model_name Qwen/Qwen3-VL-8B-Instruct \
+    --dataset_name "l5_feature_ablation_v1_$variant" \
+    --output_dir results
+done
+```
+
+Analyze the latest run for each variant:
+
+```bash
+python scripts/analyze_results.py \
+  --input results \
+  --dataset_name_prefix l5_feature_ablation_v1_ \
+  --latest_per_dataset \
+  --output_dir analysis/l5_feature_ablation_v1 \
+  --plots
+```
+
+This produces feature-level accuracy, feature-by-boundary accuracy, paired boundary differences, paired feature differences, and swap-consistency diagnostics.
+
 ## Baseline And Synthetic References
 
 The legacy generator is kept for two reference settings outside the ladder:

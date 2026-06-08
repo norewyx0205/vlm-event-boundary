@@ -27,6 +27,16 @@ def dataset_name_from_path(path):
     return ""
 
 
+def latest_result_files(paths):
+    latest = {}
+    for path in paths:
+        dataset_name = dataset_name_from_path(path)
+        key = (str(Path(path).parents[2]), dataset_name)
+        if key not in latest or path.parent.name > latest[key].parent.name:
+            latest[key] = path
+    return sorted(latest.values())
+
+
 def load_rows(paths, dataset_name_prefix=None):
     rows = []
     for path in paths:
@@ -118,6 +128,7 @@ def swap_consistency(rows):
             "dataset_version": dataset_version,
             "difficulty_level": difficulty_level,
             "difficulty_name": pair["original"].get("difficulty_name", ""),
+            "feature_variant": pair["original"].get("feature_variant", ""),
             "condition": condition,
             "video_id": video_id,
             "category": category,
@@ -163,6 +174,7 @@ def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
             row.get("dataset_version", ""),
             str(row.get("difficulty_level", "")),
             row.get("difficulty_name", ""),
+            row.get("feature_variant", ""),
             infer_base_sample_id(row),
         )
         by_unit[key][condition].append(int(bool(row.get("is_correct", False))))
@@ -172,7 +184,15 @@ def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
         if baseline_condition not in condition_values:
             continue
         low_acc = mean(condition_values[baseline_condition])
-        source_file, dataset_name, dataset_version, difficulty_level, difficulty_name, base_sample_id = key
+        (
+            source_file,
+            dataset_name,
+            dataset_version,
+            difficulty_level,
+            difficulty_name,
+            feature_variant,
+            base_sample_id,
+        ) = key
 
         for condition, values in sorted(condition_values.items()):
             if condition == baseline_condition:
@@ -192,6 +212,7 @@ def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
                 "dataset_version": dataset_version,
                 "difficulty_level": difficulty_level,
                 "difficulty_name": difficulty_name,
+                "feature_variant": feature_variant,
                 "base_sample_id": base_sample_id,
                 "comparison": f"{condition}_minus_{baseline_condition}",
                 "condition": condition,
@@ -204,16 +225,24 @@ def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
 
     grouped = defaultdict(list)
     for row in detail_rows:
-        grouped[(row["difficulty_level"], row["difficulty_name"], row["comparison"])].append(row)
+        grouped[
+            (
+                row["difficulty_level"],
+                row["difficulty_name"],
+                row["feature_variant"],
+                row["comparison"],
+            )
+        ].append(row)
 
     summary_rows = []
     for key, items in sorted(grouped.items(), key=lambda kv: kv[0]):
-        difficulty_level, difficulty_name, comparison = key
+        difficulty_level, difficulty_name, feature_variant, comparison = key
         differences = [item["difference"] for item in items]
         directions = Counter(item["direction"] for item in items)
         summary_rows.append({
             "difficulty_level": difficulty_level,
             "difficulty_name": difficulty_name,
+            "feature_variant": feature_variant,
             "comparison": comparison,
             "pairs": len(items),
             "mean_difference": mean(differences),
@@ -221,6 +250,79 @@ def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
             "same": directions.get("same", 0),
             "worse": directions.get("worse", 0),
         })
+
+    return summary_rows, detail_rows
+
+
+def result_model_group(row):
+    source = Path(row.get("_source_file", ""))
+    return source.parents[2].name if len(source.parents) >= 3 else ""
+
+
+def paired_feature_comparison(rows):
+    by_unit = defaultdict(lambda: defaultdict(list))
+    for row in rows:
+        feature_variant = row.get("feature_variant", "")
+        if feature_variant not in {"full", "shape_only", "color_only"}:
+            continue
+        key = (
+            result_model_group(row),
+            row.get("dataset_version", ""),
+            infer_base_sample_id(row),
+            row.get("condition", ""),
+        )
+        by_unit[key][feature_variant].append(int(bool(row.get("is_correct", False))))
+
+    comparisons = [
+        ("shape_only", "full"),
+        ("color_only", "shape_only"),
+        ("color_only", "full"),
+    ]
+    detail_rows = []
+    for key, feature_values in by_unit.items():
+        model_group, dataset_version, base_sample_id, condition = key
+        for feature_variant, baseline_variant in comparisons:
+            if feature_variant not in feature_values or baseline_variant not in feature_values:
+                continue
+            feature_accuracy = mean(feature_values[feature_variant])
+            baseline_accuracy = mean(feature_values[baseline_variant])
+            difference = feature_accuracy - baseline_accuracy
+            detail_rows.append({
+                "model_group": model_group,
+                "dataset_version": dataset_version,
+                "base_sample_id": base_sample_id,
+                "condition": condition,
+                "comparison": f"{feature_variant}_minus_{baseline_variant}",
+                "feature_variant": feature_variant,
+                "baseline_variant": baseline_variant,
+                "feature_accuracy": feature_accuracy,
+                "baseline_accuracy": baseline_accuracy,
+                "difference": difference,
+                "direction": "improved" if difference > 0 else "worse" if difference < 0 else "same",
+            })
+
+    summary_rows = []
+    for condition_scope in ("by_condition", "overall"):
+        grouped = defaultdict(list)
+        for row in detail_rows:
+            key = (
+                row["comparison"],
+                row["condition"] if condition_scope == "by_condition" else "all",
+            )
+            grouped[key].append(row)
+
+        for (comparison, condition), items in sorted(grouped.items()):
+            directions = Counter(item["direction"] for item in items)
+            summary_rows.append({
+                "scope": condition_scope,
+                "condition": condition,
+                "comparison": comparison,
+                "pairs": len(items),
+                "mean_difference": mean([item["difference"] for item in items]),
+                "improved": directions.get("improved", 0),
+                "same": directions.get("same", 0),
+                "worse": directions.get("worse", 0),
+            })
 
     return summary_rows, detail_rows
 
@@ -316,17 +418,119 @@ def make_plot(rows, output_path):
     cv2.imwrite(str(output_path), image)
 
 
+def make_feature_plot(rows, output_path):
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        print("opencv-python and numpy are required for plots; skipping feature plot.")
+        return
+
+    variants = ["full", "shape_only", "color_only"]
+    labels = {
+        "full": "Full",
+        "shape_only": "Shape only",
+        "color_only": "Color only",
+    }
+    grouped = defaultdict(dict)
+    for row in rows:
+        grouped[row["condition"]][row["feature_variant"]] = float(row["accuracy"])
+
+    width, height = 1120, 620
+    margin_left, margin_right = 95, 290
+    margin_top, margin_bottom = 85, 95
+    plot_w = width - margin_left - margin_right
+    plot_h = height - margin_top - margin_bottom
+    image = np.ones((height, width, 3), dtype=np.uint8) * 255
+    axis_color = (40, 40, 40)
+
+    cv2.line(image, (margin_left, margin_top), (margin_left, margin_top + plot_h), axis_color, 2)
+    cv2.line(image, (margin_left, margin_top + plot_h), (margin_left + plot_w, margin_top + plot_h), axis_color, 2)
+
+    x_positions = {}
+    for idx, variant in enumerate(variants):
+        x = margin_left + round(idx / (len(variants) - 1) * plot_w)
+        x_positions[variant] = x
+        cv2.line(image, (x, margin_top + plot_h), (x, margin_top + plot_h + 6), axis_color, 1)
+        cv2.putText(
+            image,
+            labels[variant],
+            (x - 48, margin_top + plot_h + 32),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            axis_color,
+            1,
+        )
+
+    for acc in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        y = margin_top + plot_h - round(acc * plot_h)
+        cv2.line(image, (margin_left - 6, y), (margin_left, y), axis_color, 1)
+        cv2.putText(image, f"{acc:.2f}", (20, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, axis_color, 1)
+
+    colors = {
+        "low_boundary": (31, 119, 180),
+        "temporal_boundary": (44, 160, 44),
+        "visual_boundary": (214, 39, 40),
+        "audio_boundary": (148, 103, 189),
+    }
+    legend_x = margin_left + plot_w + 35
+    cv2.putText(image, "Boundary", (legend_x, margin_top - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
+
+    for idx, condition in enumerate(sorted(grouped)):
+        color = colors.get(condition, (80, 80, 80))
+        points = []
+        for variant in variants:
+            if variant not in grouped[condition]:
+                continue
+            x = x_positions[variant]
+            y = margin_top + plot_h - round(grouped[condition][variant] * plot_h)
+            points.append((x, y))
+        for p1, p2 in zip(points, points[1:]):
+            cv2.line(image, p1, p2, color, 3)
+        for point in points:
+            cv2.circle(image, point, 6, color, -1)
+
+        legend_y = margin_top + 12 + idx * 30
+        cv2.line(image, (legend_x, legend_y), (legend_x + 30, legend_y), color, 3)
+        cv2.putText(
+            image,
+            condition,
+            (legend_x + 38, legend_y + 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            axis_color,
+            1,
+        )
+
+    cv2.putText(
+        image,
+        "Level 5 feature ablation by boundary condition",
+        (margin_left, 42),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.75,
+        axis_color,
+        2,
+    )
+    cv2.putText(image, "Feature encoding", (margin_left + plot_w // 2 - 75, height - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, axis_color, 2)
+    cv2.putText(image, "Accuracy", (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), image)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="raw_results.jsonl file or directory containing run folders.")
     parser.add_argument("--output_dir", default=str(PROJECT_ROOT / "analysis"))
     parser.add_argument("--dataset_name_prefix", default=None, help="Only analyze rows/runs whose dataset_name starts with this prefix.")
+    parser.add_argument("--latest_per_dataset", action="store_true", help="Use only the latest timestamped run for each dataset.")
     parser.add_argument("--plots", action="store_true")
     args = parser.parse_args()
 
     result_files = load_result_files(args.input)
     if not result_files:
         raise FileNotFoundError(f"No raw_results.jsonl files found under {args.input}")
+    if args.latest_per_dataset:
+        result_files = latest_result_files(result_files)
 
     rows = load_rows(result_files, dataset_name_prefix=args.dataset_name_prefix)
     if not rows:
@@ -346,6 +550,17 @@ def main():
         "category",
     )
     paired_summary, paired_details = paired_boundary_comparison(rows)
+    feature_rows = [row for row in rows if row.get("feature_variant") in {"full", "shape_only", "color_only"}]
+    by_feature = grouped_accuracy(feature_rows, ["feature_variant"]) if feature_rows else []
+    by_feature_condition = grouped_accuracy(feature_rows, ["feature_variant", "condition"]) if feature_rows else []
+    by_feature_correct_option = grouped_accuracy(feature_rows, ["feature_variant", "correct_option"]) if feature_rows else []
+    by_feature_prompt_variant = grouped_accuracy(feature_rows, ["feature_variant", "prompt_variant"]) if feature_rows else []
+    swap_by_feature_condition = grouped_counts(
+        [row for row in swap_details if row.get("feature_variant")],
+        ["feature_variant", "condition"],
+        "category",
+    )
+    paired_feature_summary, paired_feature_details = paired_feature_comparison(feature_rows)
 
     write_csv(output_dir / "accuracy_by_difficulty.csv", by_difficulty)
     write_csv(output_dir / "accuracy_by_difficulty_condition.csv", by_difficulty_condition)
@@ -357,6 +572,13 @@ def main():
     write_csv(output_dir / "swap_consistency_by_level_condition.csv", swap_by_level_condition)
     write_csv(output_dir / "paired_boundary_summary.csv", paired_summary)
     write_csv(output_dir / "paired_boundary_details.csv", paired_details)
+    write_csv(output_dir / "accuracy_by_feature_variant.csv", by_feature)
+    write_csv(output_dir / "accuracy_by_feature_variant_condition.csv", by_feature_condition)
+    write_csv(output_dir / "accuracy_by_feature_variant_correct_option.csv", by_feature_correct_option)
+    write_csv(output_dir / "accuracy_by_feature_variant_prompt_variant.csv", by_feature_prompt_variant)
+    write_csv(output_dir / "swap_consistency_by_feature_condition.csv", swap_by_feature_condition)
+    write_csv(output_dir / "paired_feature_summary.csv", paired_feature_summary)
+    write_csv(output_dir / "paired_feature_details.csv", paired_feature_details)
 
     summary = {
         "input": args.input,
@@ -370,11 +592,18 @@ def main():
         "prediction_distribution": pred_dist,
         "swap_consistency": swap_summary,
         "paired_boundary_summary": paired_summary,
+        "accuracy_by_feature_variant": by_feature,
+        "accuracy_by_feature_variant_condition": by_feature_condition,
+        "accuracy_by_feature_variant_correct_option": by_feature_correct_option,
+        "accuracy_by_feature_variant_prompt_variant": by_feature_prompt_variant,
+        "paired_feature_summary": paired_feature_summary,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if args.plots:
         make_plot(by_difficulty_condition, output_dir / "accuracy_by_difficulty_condition.png")
+        if by_feature_condition:
+            make_feature_plot(by_feature_condition, output_dir / "accuracy_by_feature_variant_condition.png")
 
     print(f"Analyzed {len(rows)} rows from {len(result_files)} raw result file(s).")
     print(f"Saved analysis to {output_dir}")
