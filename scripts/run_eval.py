@@ -119,7 +119,7 @@ def process_video_inputs(messages):
     return image_inputs, video_inputs, video_kwargs
 
 
-def ask_model(model, processor, video_path, option_a, option_b, video_fps=None, video_max_pixels=None):
+def build_messages(video_path, option_a, option_b, video_fps=None, video_max_pixels=None):
     prompt = f"""
 Watch the video carefully.
 
@@ -140,7 +140,7 @@ Answer with only A or B.
     if video_max_pixels is not None:
         video_content["max_pixels"] = video_max_pixels
 
-    messages = [{
+    return [{
         "role": "user",
         "content": [
             video_content,
@@ -148,8 +148,26 @@ Answer with only A or B.
         ],
     }]
 
+
+def ask_model(
+    model,
+    processor,
+    video_path,
+    option_a,
+    option_b,
+    video_fps=None,
+    video_max_pixels=None,
+    max_new_tokens=10,
+    empty_cache_each_sample=False,
+    prepared_vision=None,
+):
+    messages = build_messages(video_path, option_a, option_b, video_fps, video_max_pixels)
+
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    image_inputs, video_inputs, video_kwargs = process_video_inputs(messages)
+    if prepared_vision is None:
+        image_inputs, video_inputs, video_kwargs = process_video_inputs(messages)
+    else:
+        image_inputs, video_inputs, video_kwargs = prepared_vision
     inputs = processor(
         text=[text],
         images=image_inputs,
@@ -160,7 +178,7 @@ Answer with only A or B.
     ).to(model.device)
 
     with torch.inference_mode():
-        generated_ids = model.generate(**inputs, max_new_tokens=10, do_sample=False)
+        generated_ids = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     generated_ids_trimmed = [
         out_ids[len(in_ids):]
         for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -171,7 +189,7 @@ Answer with only A or B.
         clean_up_tokenization_spaces=False,
     )[0]
     del inputs, generated_ids, generated_ids_trimmed
-    if torch.cuda.is_available():
+    if empty_cache_each_sample and torch.cuda.is_available():
         torch.cuda.empty_cache()
     return parse_answer(raw_text), raw_text
 
@@ -187,51 +205,9 @@ def print_section(title, summary):
         print(f"{key}: {item['accuracy']:.2f} ({item['correct']}/{item['total']})")
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--annotation_path", "--annotation-path", required=True)
-    parser.add_argument("--model_name", "--model-name", default="Qwen/Qwen2-VL-2B-Instruct")
-    parser.add_argument("--dataset_name", "--dataset-name", default=None)
-    parser.add_argument("--output_dir", "--output-dir", "--result-dir", default=str(PROJECT_ROOT / "results"))
-    parser.add_argument("--max_samples", "--max-samples", type=int, default=None)
-    parser.add_argument(
-        "--video_fps",
-        "--video-fps",
-        type=float,
-        default=None,
-        help="Optional frames sampled per second from each video. Lower values reduce GPU memory use.",
-    )
-    parser.add_argument(
-        "--video_max_pixels",
-        "--video-max-pixels",
-        type=int,
-        default=None,
-        help="Optional maximum pixels per sampled video frame. Lower values reduce visual tokens and GPU memory use.",
-    )
-    parser.add_argument(
-        "--load_in_4bit",
-        "--load-in-4bit",
-        action="store_true",
-        help="Load the model with bitsandbytes 4-bit quantization. Recommended for Qwen3-VL-8B on Colab T4.",
-    )
-    parser.add_argument(
-        "--experiment_version",
-        "--experiment-version",
-        default=None,
-        help="Backward-compatible alias used as dataset_name when --dataset_name is omitted.",
-    )
-    parser.add_argument(
-        "--output_name",
-        "--output-name",
-        default="raw_results.jsonl",
-        help="Backward-compatible raw result filename option.",
-    )
-    args = parser.parse_args()
-
-    dataset_name = args.dataset_name or args.experiment_version or Path(args.annotation_path).parent.name
+def evaluate_annotation(model, processor, args, annotation_path, dataset_name, timestamp):
     dataset_slug = slugify(dataset_name)
     safe_model_name = slugify(args.model_name)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(args.output_dir) / safe_model_name / dataset_slug / timestamp
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -239,8 +215,7 @@ def main():
     summary_path = run_dir / "summary.json"
     config_path = run_dir / "config.json"
 
-    model, processor = load_model(args.model_name, load_in_4bit=args.load_in_4bit)
-    data = read_jsonl(args.annotation_path)
+    data = read_jsonl(annotation_path)
     if args.max_samples is not None:
         data = data[:args.max_samples]
 
@@ -251,9 +226,21 @@ def main():
     by_correct_option = defaultdict(lambda: {"total": 0, "correct": 0})
     by_prompt_variant = defaultdict(lambda: {"total": 0, "correct": 0})
     by_prediction = defaultdict(lambda: {"total": 0, "correct": 0})
+    cached_video_path = None
+    cached_vision = None
 
     for item in data:
         print(f"Processing {item.get('eval_id', item['video_id'])}")
+        if args.disable_video_cache or item["video_path"] != cached_video_path:
+            messages = build_messages(
+                item["video_path"],
+                item["option_A"],
+                item["option_B"],
+                args.video_fps,
+                args.video_max_pixels,
+            )
+            cached_vision = process_video_inputs(messages)
+            cached_video_path = item["video_path"]
         pred, raw_response = ask_model(
             model,
             processor,
@@ -262,6 +249,9 @@ def main():
             item["option_B"],
             args.video_fps,
             args.video_max_pixels,
+            args.max_new_tokens,
+            args.empty_cache_each_sample,
+            cached_vision,
         )
         correct = pred == item["correct_option"]
 
@@ -298,7 +288,7 @@ def main():
     summary = {
         "model_name": args.model_name,
         "dataset_name": dataset_name,
-        "annotation_path": args.annotation_path,
+        "annotation_path": str(annotation_path),
         "run_dir": str(run_dir),
         "timestamp": timestamp,
         "overall": {
@@ -314,6 +304,7 @@ def main():
         "by_prediction": summarize_counts(by_prediction),
     }
     config = vars(args) | {
+        "annotation_path": str(annotation_path),
         "dataset_name": dataset_name,
         "dataset_slug": dataset_slug,
         "timestamp": timestamp,
@@ -331,6 +322,103 @@ def main():
     print_section("=== BY CORRECT OPTION ===", summary["by_correct_option"])
     print_section("=== BY PROMPT VARIANT ===", summary["by_prompt_variant"])
     print_section("=== BY PREDICTION ===", summary["by_prediction"])
+    return summary
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--annotation_path", "--annotation-path", default=None)
+    parser.add_argument(
+        "--annotation_root",
+        "--annotation-root",
+        default=None,
+        help="Evaluate every immediate child annotations.jsonl under this directory with one model load.",
+    )
+    parser.add_argument("--model_name", "--model-name", default="Qwen/Qwen2-VL-2B-Instruct")
+    parser.add_argument("--dataset_name", "--dataset-name", default=None)
+    parser.add_argument(
+        "--dataset_name_prefix",
+        "--dataset-name-prefix",
+        default=None,
+        help="Prefix for dataset names when --annotation_root evaluates multiple datasets.",
+    )
+    parser.add_argument("--output_dir", "--output-dir", "--result-dir", default=str(PROJECT_ROOT / "results"))
+    parser.add_argument("--max_samples", "--max-samples", type=int, default=None)
+    parser.add_argument(
+        "--video_fps",
+        "--video-fps",
+        type=float,
+        default=None,
+        help="Optional frames sampled per second from each video. Lower values reduce GPU memory use.",
+    )
+    parser.add_argument(
+        "--video_max_pixels",
+        "--video-max-pixels",
+        type=int,
+        default=None,
+        help="Optional maximum pixels per sampled video frame. Lower values reduce visual tokens and GPU memory use.",
+    )
+    parser.add_argument(
+        "--load_in_4bit",
+        "--load-in-4bit",
+        action="store_true",
+        help="Load the model with bitsandbytes 4-bit quantization. Recommended for Qwen3-VL-8B on Colab T4.",
+    )
+    parser.add_argument("--max_new_tokens", "--max-new-tokens", type=int, default=10)
+    parser.add_argument(
+        "--empty_cache_each_sample",
+        "--empty-cache-each-sample",
+        action="store_true",
+        help="Force torch.cuda.empty_cache() after every prompt. Usually slower; use only for memory pressure.",
+    )
+    parser.add_argument(
+        "--disable_video_cache",
+        "--disable-video-cache",
+        action="store_true",
+        help="Decode every prompt video separately instead of reusing the adjacent original/swapped video input.",
+    )
+    parser.add_argument(
+        "--experiment_version",
+        "--experiment-version",
+        default=None,
+        help="Backward-compatible alias used as dataset_name when --dataset_name is omitted.",
+    )
+    parser.add_argument(
+        "--output_name",
+        "--output-name",
+        default="raw_results.jsonl",
+        help="Backward-compatible raw result filename option.",
+    )
+    args = parser.parse_args()
+
+    if bool(args.annotation_path) == bool(args.annotation_root):
+        parser.error("Provide exactly one of --annotation_path or --annotation_root.")
+
+    if args.annotation_root:
+        annotation_paths = sorted(Path(args.annotation_root).glob("*/annotations.jsonl"))
+        if not annotation_paths:
+            raise FileNotFoundError(f"No */annotations.jsonl files found under {args.annotation_root}")
+    else:
+        annotation_paths = [Path(args.annotation_path)]
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    model, processor = load_model(args.model_name, load_in_4bit=args.load_in_4bit)
+
+    for annotation_path in annotation_paths:
+        if len(annotation_paths) == 1:
+            dataset_name = args.dataset_name or args.experiment_version or annotation_path.parent.name
+        else:
+            prefix = args.dataset_name_prefix or ""
+            dataset_name = f"{prefix}{annotation_path.parent.name}"
+        print(f"\nRunning {dataset_name} from {annotation_path}")
+        evaluate_annotation(
+            model,
+            processor,
+            args,
+            annotation_path,
+            dataset_name,
+            timestamp,
+        )
 
 
 if __name__ == "__main__":

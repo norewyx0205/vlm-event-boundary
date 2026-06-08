@@ -143,14 +143,14 @@ python scripts/check_l5_feature_ablation.py \
 Evaluate all variants:
 
 ```bash
-for variant in L5_full L5_shape_only L5_color_only; do
-  python scripts/run_eval.py \
-    --annotation_path "data/l5_feature_ablation_v1/$variant/annotations.jsonl" \
-    --model_name Qwen/Qwen3-VL-8B-Instruct \
-    --dataset_name "l5_feature_ablation_v1_$variant" \
-    --output_dir results
-done
+python scripts/run_eval.py \
+  --annotation_root data/l5_feature_ablation_v1 \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name_prefix l5_feature_ablation_v1_ \
+  --output_dir results
 ```
+
+`--annotation_root` loads the model once and evaluates every immediate child `annotations.jsonl`. This is substantially faster than launching one process per level or variant.
 
 Analyze the latest run for each variant:
 
@@ -222,6 +222,18 @@ python scripts/run_eval.py \
   --dataset_name ladder_v2_level_5_target_like_moving_distractors \
   --output_dir results
 ```
+
+Run the complete ladder with one model load:
+
+```bash
+python scripts/run_eval.py \
+  --annotation_root data/ladder_v2 \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name_prefix ladder_v2_ \
+  --output_dir results
+```
+
+The runner keeps CUDA caching enabled by default. `--empty_cache_each_sample` is available only for unusually tight GPU-memory situations because it generally reduces throughput.
 
 Quick smoke test:
 
