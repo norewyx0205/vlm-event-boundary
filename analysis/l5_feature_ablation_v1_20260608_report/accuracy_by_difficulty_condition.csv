@@ -1,0 +1,5 @@
+difficulty_level,condition,total,correct,accuracy
+5,audio_boundary,180,154,0.8555555555555555
+5,low_boundary,180,151,0.8388888888888889
+5,temporal_boundary,180,164,0.9111111111111111
+5,visual_boundary,180,140,0.7777777777777778

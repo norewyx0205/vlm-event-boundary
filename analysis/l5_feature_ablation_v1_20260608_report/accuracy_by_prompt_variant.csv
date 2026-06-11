@@ -1,0 +1,3 @@
+prompt_variant,total,correct,accuracy
+original,360,254,0.7055555555555556
+swapped,360,355,0.9861111111111112

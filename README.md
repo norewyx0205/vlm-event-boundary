@@ -163,7 +163,13 @@ python scripts/analyze_results.py \
   --plots
 ```
 
-This produces feature-level accuracy, feature-by-boundary accuracy, paired boundary differences, paired feature differences, and swap-consistency diagnostics.
+This produces feature-level accuracy, strict mirrored-pair accuracy, the accuracy-strict gap `d`, position-sensitive pair rates, paired boundary/feature differences, and swap-consistency diagnostics. Report plots include:
+
+- prompt accuracy versus strict both-correct accuracy
+- mirrored-pair outcome proportions
+- feature-by-boundary prompt and strict accuracy
+- visual-boundary effects by feature condition
+- correct-option A/B response-position sensitivity
 
 ## Baseline And Synthetic References
 
@@ -230,10 +236,42 @@ python scripts/run_eval.py \
   --annotation_root data/ladder_v2 \
   --model_name Qwen/Qwen3-VL-8B-Instruct \
   --dataset_name_prefix ladder_v2_ \
-  --output_dir results
+  --output_dir results \
+  --seed 42 \
+  --deterministic \
+  --attn_implementation eager
 ```
 
 The runner keeps CUDA caching enabled by default. `--empty_cache_each_sample` is available only for unusually tight GPU-memory situations because it generally reduces throughput.
+
+### Reproducible evaluation
+
+The evaluator already uses greedy decoding (`do_sample=False`, one beam). For repeatable
+Qwen3-VL runs on the same GPU/runtime, also use:
+
+```bash
+PYTHONHASHSEED=42 python scripts/run_eval.py \
+  --annotation_root data/ladder_v2 \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --model_revision <commit-hash> \
+  --dataset_name_prefix ladder_v2_ \
+  --output_dir results \
+  --seed 42 \
+  --deterministic \
+  --attn_implementation eager
+```
+
+After the first run, copy `environment.model_commit_hash` from its `config.json` into
+`--model_revision`. Each config also records the annotation SHA-256, package versions,
+CUDA/cuDNN versions, GPU name, seed, and attention backend. Exact equality is expected
+only when the model commit, annotations, package/runtime versions, hardware, and command
+are unchanged. Different GPU types or CUDA stacks can still produce small floating-point
+differences near a decision boundary.
+
+`eager` attention is the conservative reproducibility setting. If throughput matters
+more, use `--attn_implementation sdpa`; keep that choice fixed across compared runs.
+If strict deterministic mode reports an unsupported operation, add
+`--deterministic_warn_only` and record that relaxation.
 
 Quick smoke test:
 
@@ -317,7 +355,7 @@ pip install opencv-python numpy imageio-ffmpeg
 Qwen evaluation:
 
 ```bash
-pip install torch transformers accelerate qwen-vl-utils decord
+pip install torch "transformers==5.9.0" accelerate "qwen-vl-utils==0.0.14" "decord==0.6.0"
 ```
 
 For smaller GPUs, install `bitsandbytes` and add `--load_in_4bit --video_fps 1 --video_max_pixels 150000`.

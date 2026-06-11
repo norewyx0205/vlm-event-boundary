@@ -162,6 +162,47 @@ def grouped_counts(rows, keys, count_key):
     return out
 
 
+def strict_pair_metrics(prompt_rows, swap_details, keys):
+    prompt_stats = {
+        tuple(row.get(key, "") for key in keys): row
+        for row in grouped_accuracy(prompt_rows, keys)
+    }
+    pair_stats = defaultdict(Counter)
+    for row in swap_details:
+        key = tuple(row.get(key_name, "") for key_name in keys)
+        category = row["category"]
+        if category in {"original_correct_swapped_wrong", "original_wrong_swapped_correct"}:
+            category = "exactly_one_correct"
+        pair_stats[key][category] += 1
+
+    output = []
+    for key, counts in sorted(pair_stats.items()):
+        total_pairs = sum(counts.values())
+        both_correct = counts.get("both_correct", 0)
+        exactly_one = counts.get("exactly_one_correct", 0)
+        both_wrong = counts.get("both_wrong", 0)
+        prompt_accuracy = prompt_stats.get(key, {}).get("accuracy")
+        strict_accuracy = both_correct / total_pairs if total_pairs else None
+        accuracy_strict_gap = (
+            prompt_accuracy - strict_accuracy
+            if prompt_accuracy is not None and strict_accuracy is not None
+            else None
+        )
+        output.append({
+            **{key_name: key_value for key_name, key_value in zip(keys, key)},
+            "video_pairs": total_pairs,
+            "prompt_accuracy": prompt_accuracy,
+            "strict_both_correct": strict_accuracy,
+            "accuracy_strict_gap_d": accuracy_strict_gap,
+            "position_sensitive_rate": exactly_one / total_pairs if total_pairs else None,
+            "both_wrong_rate": both_wrong / total_pairs if total_pairs else None,
+            "both_correct_count": both_correct,
+            "exactly_one_correct_count": exactly_one,
+            "both_wrong_count": both_wrong,
+        })
+    return output
+
+
 def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
     by_unit = defaultdict(lambda: defaultdict(list))
     for row in rows:
@@ -410,7 +451,7 @@ def make_plot(rows, output_path):
         cv2.line(image, (lx, ly), (lx + 30, ly), color, 3)
         cv2.putText(image, condition, (lx + 38, ly + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, axis_color, 1)
 
-    cv2.putText(image, "Accuracy by difficulty level and boundary condition", (margin_left, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.75, axis_color, 2)
+    cv2.putText(image, "Accuracy by difficulty level and boundary condition", (margin_left + 30, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.75, axis_color, 2)
     cv2.putText(image, "Difficulty level", (margin_left + plot_w // 2 - 80, height - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, axis_color, 2)
     cv2.putText(image, "Accuracy", (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
 
@@ -418,7 +459,7 @@ def make_plot(rows, output_path):
     cv2.imwrite(str(output_path), image)
 
 
-def make_feature_plot(rows, output_path):
+def make_feature_plot(rows, output_path, title="Level 5 feature ablation by boundary condition"):
     try:
         import cv2
         import numpy as np
@@ -504,8 +545,8 @@ def make_feature_plot(rows, output_path):
 
     cv2.putText(
         image,
-        "Level 5 feature ablation by boundary condition",
-        (margin_left, 42),
+        title,
+        (margin_left + 30, 42),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.75,
         axis_color,
@@ -513,6 +554,168 @@ def make_feature_plot(rows, output_path):
     )
     cv2.putText(image, "Feature encoding", (margin_left + plot_w // 2 - 75, height - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, axis_color, 2)
     cv2.putText(image, "Accuracy", (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), image)
+
+
+def make_grouped_bar_plot(categories, series, values, title, output_path, y_label="Rate"):
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        print("opencv-python and numpy are required for plots; skipping grouped bar plot.")
+        return
+
+    width, height = 1120, 650
+    margin_left, margin_right = 95, 250
+    margin_top, margin_bottom = 90, 115
+    plot_w = width - margin_left - margin_right
+    plot_h = height - margin_top - margin_bottom
+    image = np.ones((height, width, 3), dtype=np.uint8) * 255
+    axis_color = (40, 40, 40)
+    palette = [(31, 119, 180), (44, 160, 44), (214, 39, 40), (148, 103, 189)]
+
+    cv2.line(image, (margin_left, margin_top), (margin_left, margin_top + plot_h), axis_color, 2)
+    cv2.line(image, (margin_left, margin_top + plot_h), (margin_left + plot_w, margin_top + plot_h), axis_color, 2)
+    for rate in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        y = margin_top + plot_h - round(rate * plot_h)
+        cv2.line(image, (margin_left - 6, y), (margin_left, y), axis_color, 1)
+        cv2.putText(image, f"{rate:.2f}", (20, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, axis_color, 1)
+
+    group_w = plot_w / max(1, len(categories))
+    usable_w = group_w * 0.72
+    bar_w = usable_w / max(1, len(series))
+    for category_idx, category in enumerate(categories):
+        group_center = margin_left + (category_idx + 0.5) * group_w
+        group_start = group_center - usable_w / 2
+        for series_idx, series_name in enumerate(series):
+            value = values.get((category, series_name))
+            if value is None:
+                continue
+            x1 = round(group_start + series_idx * bar_w + 4)
+            x2 = round(group_start + (series_idx + 1) * bar_w - 4)
+            y = margin_top + plot_h - round(value * plot_h)
+            cv2.rectangle(image, (x1, y), (x2, margin_top + plot_h), palette[series_idx], -1)
+            cv2.putText(
+                image,
+                f"{value:.2f}",
+                (x1, max(margin_top + 18, y - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                axis_color,
+                1,
+            )
+        label_x = round(group_center - max(30, len(category) * 4))
+        cv2.putText(
+            image,
+            category,
+            (label_x, margin_top + plot_h + 34),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            axis_color,
+            1,
+        )
+
+    legend_x = margin_left + plot_w + 30
+    cv2.putText(image, "Measure", (legend_x, margin_top - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
+    for idx, series_name in enumerate(series):
+        y = margin_top + 14 + idx * 34
+        cv2.rectangle(image, (legend_x, y - 12), (legend_x + 25, y + 8), palette[idx], -1)
+        cv2.putText(image, series_name, (legend_x + 36, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.52, axis_color, 1)
+
+    cv2.putText(image, title, (margin_left, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.72, axis_color, 2)
+    cv2.putText(image, y_label, (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.58, axis_color, 2)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), image)
+
+
+def make_pair_outcome_plot(rows, output_path):
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        print("opencv-python and numpy are required for plots; skipping pair outcome plot.")
+        return
+
+    variants = ["full", "shape_only", "color_only"]
+    labels = {"full": "Full", "shape_only": "Shape only", "color_only": "Color only"}
+    categories = ["both_correct", "exactly_one_correct", "both_wrong"]
+    colors = {
+        "both_correct": (44, 160, 44),
+        "exactly_one_correct": (31, 119, 180),
+        "both_wrong": (214, 39, 40),
+    }
+    values = {
+        (row["feature_variant"], category): float(row[value_name])
+        for row in rows
+        for category, value_name in [
+            ("both_correct", "strict_both_correct"),
+            ("exactly_one_correct", "position_sensitive_rate"),
+            ("both_wrong", "both_wrong_rate"),
+        ]
+    }
+
+    width, height = 1050, 650
+    margin_left, margin_right = 100, 270
+    margin_top, margin_bottom = 90, 100
+    plot_w = width - margin_left - margin_right
+    plot_h = height - margin_top - margin_bottom
+    image = np.ones((height, width, 3), dtype=np.uint8) * 255
+    axis_color = (40, 40, 40)
+    cv2.line(image, (margin_left, margin_top), (margin_left, margin_top + plot_h), axis_color, 2)
+    cv2.line(image, (margin_left, margin_top + plot_h), (margin_left + plot_w, margin_top + plot_h), axis_color, 2)
+
+    for rate in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        y = margin_top + plot_h - round(rate * plot_h)
+        cv2.line(image, (margin_left - 6, y), (margin_left, y), axis_color, 1)
+        cv2.putText(image, f"{rate:.2f}", (20, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, axis_color, 1)
+
+    group_w = plot_w / len(variants)
+    bar_w = min(120, group_w * 0.55)
+    for idx, variant in enumerate(variants):
+        center = margin_left + (idx + 0.5) * group_w
+        x1, x2 = round(center - bar_w / 2), round(center + bar_w / 2)
+        bottom_y = margin_top + plot_h
+        for category in categories:
+            value = values.get((variant, category), 0.0)
+            segment_h = round(value * plot_h)
+            top_y = bottom_y - segment_h
+            cv2.rectangle(image, (x1, top_y), (x2, bottom_y), colors[category], -1)
+            if value >= 0.04:
+                cv2.putText(
+                    image,
+                    f"{value:.2f}",
+                    (x1 + 8, top_y + max(18, segment_h // 2)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48,
+                    (255, 255, 255),
+                    1,
+                )
+            bottom_y = top_y
+        cv2.putText(
+            image,
+            labels[variant],
+            (round(center - 48), margin_top + plot_h + 34),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            axis_color,
+            1,
+        )
+
+    legend_x = margin_left + plot_w + 30
+    cv2.putText(image, "Pair outcome", (legend_x, margin_top - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
+    legend_labels = {
+        "both_correct": "Both correct",
+        "exactly_one_correct": "Exactly one correct",
+        "both_wrong": "Both wrong",
+    }
+    for idx, category in enumerate(categories):
+        y = margin_top + 14 + idx * 34
+        cv2.rectangle(image, (legend_x, y - 12), (legend_x + 25, y + 8), colors[category], -1)
+        cv2.putText(image, legend_labels[category], (legend_x + 36, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, axis_color, 1)
+
+    cv2.putText(image, "Mirrored-pair outcomes by feature condition", (margin_left, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.72, axis_color, 2)
+    cv2.putText(image, "Proportion", (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.58, axis_color, 2)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), image)
 
@@ -560,6 +763,13 @@ def main():
         ["feature_variant", "condition"],
         "category",
     )
+    strict_by_feature = strict_pair_metrics(feature_rows, swap_details, ["feature_variant"])
+    strict_by_feature_condition = strict_pair_metrics(
+        feature_rows,
+        swap_details,
+        ["feature_variant", "condition"],
+    )
+    strict_overall = strict_pair_metrics(feature_rows, swap_details, [])
     paired_feature_summary, paired_feature_details = paired_feature_comparison(feature_rows)
 
     write_csv(output_dir / "accuracy_by_difficulty.csv", by_difficulty)
@@ -577,6 +787,9 @@ def main():
     write_csv(output_dir / "accuracy_by_feature_variant_correct_option.csv", by_feature_correct_option)
     write_csv(output_dir / "accuracy_by_feature_variant_prompt_variant.csv", by_feature_prompt_variant)
     write_csv(output_dir / "swap_consistency_by_feature_condition.csv", swap_by_feature_condition)
+    write_csv(output_dir / "strict_pair_by_feature_variant.csv", strict_by_feature)
+    write_csv(output_dir / "strict_pair_by_feature_variant_condition.csv", strict_by_feature_condition)
+    write_csv(output_dir / "strict_pair_overall.csv", strict_overall)
     write_csv(output_dir / "paired_feature_summary.csv", paired_feature_summary)
     write_csv(output_dir / "paired_feature_details.csv", paired_feature_details)
 
@@ -596,6 +809,9 @@ def main():
         "accuracy_by_feature_variant_condition": by_feature_condition,
         "accuracy_by_feature_variant_correct_option": by_feature_correct_option,
         "accuracy_by_feature_variant_prompt_variant": by_feature_prompt_variant,
+        "strict_pair_by_feature_variant": strict_by_feature,
+        "strict_pair_by_feature_variant_condition": strict_by_feature_condition,
+        "strict_pair_overall": strict_overall,
         "paired_feature_summary": paired_feature_summary,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -604,6 +820,72 @@ def main():
         make_plot(by_difficulty_condition, output_dir / "accuracy_by_difficulty_condition.png")
         if by_feature_condition:
             make_feature_plot(by_feature_condition, output_dir / "accuracy_by_feature_variant_condition.png")
+        if strict_by_feature:
+            feature_labels = {
+                "full": "Full",
+                "shape_only": "Shape only",
+                "color_only": "Color only",
+            }
+            accuracy_strict_values = {}
+            for row in strict_by_feature:
+                label = feature_labels[row["feature_variant"]]
+                accuracy_strict_values[(label, "Prompt accuracy")] = row["prompt_accuracy"]
+                accuracy_strict_values[(label, "Strict both-correct")] = row["strict_both_correct"]
+            make_grouped_bar_plot(
+                ["Full", "Shape only", "Color only"],
+                ["Prompt accuracy", "Strict both-correct"],
+                accuracy_strict_values,
+                "Prompt accuracy versus strict mirrored-pair accuracy",
+                output_dir / "accuracy_vs_strict_pair_by_feature.png",
+            )
+
+            pair_outcome_rows = strict_by_feature
+            make_pair_outcome_plot(
+                pair_outcome_rows,
+                output_dir / "pair_outcomes_by_feature.png",
+            )
+
+            correct_option_values = {}
+            for row in by_feature_correct_option:
+                label = feature_labels[row["feature_variant"]]
+                correct_option_values[(label, f"Correct option {row['correct_option']}")] = row["accuracy"]
+            make_grouped_bar_plot(
+                ["Full", "Shape only", "Color only"],
+                ["Correct option A", "Correct option B"],
+                correct_option_values,
+                "Response-position sensitivity by feature condition",
+                output_dir / "correct_option_bias_by_feature.png",
+            )
+
+            visual_values = {}
+            for row in by_feature_condition:
+                if row["condition"] not in {"low_boundary", "visual_boundary"}:
+                    continue
+                label = feature_labels[row["feature_variant"]]
+                series_name = "Low boundary" if row["condition"] == "low_boundary" else "Visual boundary"
+                visual_values[(label, series_name)] = row["accuracy"]
+            make_grouped_bar_plot(
+                ["Full", "Shape only", "Color only"],
+                ["Low boundary", "Visual boundary"],
+                visual_values,
+                "Visual-boundary effect by feature condition",
+                output_dir / "visual_boundary_effect_by_feature.png",
+            )
+
+        if strict_by_feature_condition:
+            strict_condition_plot_rows = [
+                {
+                    "feature_variant": row["feature_variant"],
+                    "condition": row["condition"],
+                    "accuracy": row["strict_both_correct"],
+                }
+                for row in strict_by_feature_condition
+            ]
+            make_feature_plot(
+                strict_condition_plot_rows,
+                output_dir / "strict_pair_by_feature_variant_condition.png",
+                title="Strict both-correct accuracy by boundary condition",
+            )
 
     print(f"Analyzed {len(rows)} rows from {len(result_files)} raw result file(s).")
     print(f"Saved analysis to {output_dir}")

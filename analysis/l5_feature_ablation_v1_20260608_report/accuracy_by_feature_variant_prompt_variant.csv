@@ -1,0 +1,7 @@
+feature_variant,prompt_variant,total,correct,accuracy
+color_only,original,120,110,0.9166666666666666
+color_only,swapped,120,115,0.9583333333333334
+full,original,120,70,0.5833333333333334
+full,swapped,120,120,1.0
+shape_only,original,120,74,0.6166666666666667
+shape_only,swapped,120,120,1.0

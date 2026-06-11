@@ -1,10 +1,17 @@
 import argparse
+import hashlib
 import json
+import os
+import platform
+import random
 from datetime import datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from collections import defaultdict
 
+import numpy as np
 import torch
+import transformers
 from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
 try:
@@ -56,11 +63,77 @@ def parse_answer(raw_text):
     return "UNKNOWN"
 
 
-def model_kwargs(load_in_4bit):
+def configure_reproducibility(seed, deterministic=False, deterministic_warn_only=False):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    if deterministic:
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = deterministic
+    if deterministic:
+        torch.use_deterministic_algorithms(True, warn_only=deterministic_warn_only)
+        if hasattr(torch.backends.cuda.matmul, "allow_tf32"):
+            torch.backends.cuda.matmul.allow_tf32 = False
+        if hasattr(torch.backends.cudnn, "allow_tf32"):
+            torch.backends.cudnn.allow_tf32 = False
+        torch.set_float32_matmul_precision("highest")
+
+
+def package_version(package_name):
+    try:
+        return version(package_name)
+    except PackageNotFoundError:
+        return None
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def environment_metadata(model):
+    gpu_names = []
+    if torch.cuda.is_available():
+        gpu_names = [
+            torch.cuda.get_device_name(device_index)
+            for device_index in range(torch.cuda.device_count())
+        ]
+    return {
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "numpy_version": np.__version__,
+        "torch_version": torch.__version__,
+        "transformers_version": transformers.__version__,
+        "accelerate_version": package_version("accelerate"),
+        "qwen_vl_utils_version": package_version("qwen-vl-utils"),
+        "decord_version": package_version("decord"),
+        "av_version": package_version("av"),
+        "opencv_version": package_version("opencv-python"),
+        "cuda_version": torch.version.cuda,
+        "cudnn_version": torch.backends.cudnn.version(),
+        "gpu_names": gpu_names,
+        "model_commit_hash": getattr(model.config, "_commit_hash", None),
+    }
+
+
+def model_kwargs(load_in_4bit, model_revision=None, attn_implementation=None):
     kwargs = {
         "dtype": torch.float16,
         "device_map": "auto",
     }
+    if model_revision:
+        kwargs["revision"] = model_revision
+    if attn_implementation:
+        kwargs["attn_implementation"] = attn_implementation
     if load_in_4bit:
         if BitsAndBytesConfig is None:
             raise ImportError("4-bit loading requires transformers BitsAndBytesConfig and bitsandbytes.")
@@ -74,15 +147,22 @@ def model_kwargs(load_in_4bit):
     return kwargs
 
 
-def load_model(model_name, load_in_4bit=False):
-    kwargs = model_kwargs(load_in_4bit)
+def load_model(
+    model_name,
+    load_in_4bit=False,
+    model_revision=None,
+    attn_implementation=None,
+):
+    kwargs = model_kwargs(load_in_4bit, model_revision, attn_implementation)
+    processor_kwargs = {"revision": model_revision} if model_revision else {}
     if AutoModelForImageTextToText is not None:
         try:
             model = AutoModelForImageTextToText.from_pretrained(
                 model_name,
                 **kwargs,
             )
-            processor = AutoProcessor.from_pretrained(model_name)
+            processor = AutoProcessor.from_pretrained(model_name, **processor_kwargs)
+            model.eval()
             return model, processor
         except Exception as exc:
             print(f"AutoModelForImageTextToText failed; falling back to Qwen2VL class: {exc}")
@@ -91,7 +171,8 @@ def load_model(model_name, load_in_4bit=False):
         model_name,
         **kwargs,
     )
-    processor = AutoProcessor.from_pretrained(model_name)
+    processor = AutoProcessor.from_pretrained(model_name, **processor_kwargs)
+    model.eval()
     return model, processor
 
 
@@ -178,7 +259,12 @@ def ask_model(
     ).to(model.device)
 
     with torch.inference_mode():
-        generated_ids = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            num_beams=1,
+        )
     generated_ids_trimmed = [
         out_ids[len(in_ids):]
         for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -305,10 +391,12 @@ def evaluate_annotation(model, processor, args, annotation_path, dataset_name, t
     }
     config = vars(args) | {
         "annotation_path": str(annotation_path),
+        "annotation_sha256": file_sha256(annotation_path),
         "dataset_name": dataset_name,
         "dataset_slug": dataset_slug,
         "timestamp": timestamp,
         "run_dir": str(run_dir),
+        "environment": environment_metadata(model),
     }
 
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -335,6 +423,36 @@ def main():
         help="Evaluate every immediate child annotations.jsonl under this directory with one model load.",
     )
     parser.add_argument("--model_name", "--model-name", default="Qwen/Qwen2-VL-2B-Instruct")
+    parser.add_argument(
+        "--model_revision",
+        "--model-revision",
+        default=None,
+        help="Optional Hugging Face branch, tag, or commit hash. Use a commit hash for long-term reproducibility.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Seed for Python, NumPy, PyTorch, and all CUDA devices.",
+    )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="Require deterministic PyTorch/CUDA algorithms and disable TF32.",
+    )
+    parser.add_argument(
+        "--deterministic_warn_only",
+        "--deterministic-warn-only",
+        action="store_true",
+        help="Warn instead of failing if a deterministic implementation is unavailable.",
+    )
+    parser.add_argument(
+        "--attn_implementation",
+        "--attn-implementation",
+        choices=["eager", "sdpa", "flash_attention_2"],
+        default=None,
+        help="Optional fixed attention backend. Use eager for the strongest cross-run reproducibility.",
+    )
     parser.add_argument("--dataset_name", "--dataset-name", default=None)
     parser.add_argument(
         "--dataset_name_prefix",
@@ -401,8 +519,18 @@ def main():
     else:
         annotation_paths = [Path(args.annotation_path)]
 
+    configure_reproducibility(
+        args.seed,
+        deterministic=args.deterministic,
+        deterministic_warn_only=args.deterministic_warn_only,
+    )
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model, processor = load_model(args.model_name, load_in_4bit=args.load_in_4bit)
+    model, processor = load_model(
+        args.model_name,
+        load_in_4bit=args.load_in_4bit,
+        model_revision=args.model_revision,
+        attn_implementation=args.attn_implementation,
+    )
 
     for annotation_path in annotation_paths:
         if len(annotation_paths) == 1:

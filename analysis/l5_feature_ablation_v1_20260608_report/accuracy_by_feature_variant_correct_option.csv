@@ -1,0 +1,7 @@
+feature_variant,correct_option,total,correct,accuracy
+color_only,A,120,110,0.9166666666666666
+color_only,B,120,115,0.9583333333333334
+full,A,120,70,0.5833333333333334
+full,B,120,120,1.0
+shape_only,A,120,74,0.6166666666666667
+shape_only,B,120,120,1.0

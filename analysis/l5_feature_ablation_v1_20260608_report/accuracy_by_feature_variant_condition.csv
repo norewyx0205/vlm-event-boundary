@@ -1,0 +1,13 @@
+feature_variant,condition,total,correct,accuracy
+color_only,audio_boundary,60,55,0.9166666666666666
+color_only,low_boundary,60,57,0.95
+color_only,temporal_boundary,60,59,0.9833333333333333
+color_only,visual_boundary,60,54,0.9
+full,audio_boundary,60,50,0.8333333333333334
+full,low_boundary,60,47,0.7833333333333333
+full,temporal_boundary,60,53,0.8833333333333333
+full,visual_boundary,60,40,0.6666666666666666
+shape_only,audio_boundary,60,49,0.8166666666666667
+shape_only,low_boundary,60,47,0.7833333333333333
+shape_only,temporal_boundary,60,52,0.8666666666666667
+shape_only,visual_boundary,60,46,0.7666666666666667

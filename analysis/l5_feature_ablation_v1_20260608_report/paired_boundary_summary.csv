@@ -1,0 +1,10 @@
+difficulty_level,difficulty_name,feature_variant,comparison,pairs,mean_difference,improved,same,worse
+5,L5_color_only,color_only,audio_boundary_minus_low_boundary,30,-0.03333333333333333,1,26,3
+5,L5_color_only,color_only,temporal_boundary_minus_low_boundary,30,0.03333333333333333,2,28,0
+5,L5_color_only,color_only,visual_boundary_minus_low_boundary,30,-0.05,1,25,4
+5,L5_full,full,audio_boundary_minus_low_boundary,30,0.05,5,23,2
+5,L5_full,full,temporal_boundary_minus_low_boundary,30,0.1,7,22,1
+5,L5_full,full,visual_boundary_minus_low_boundary,30,-0.11666666666666667,1,21,8
+5,L5_shape_only,shape_only,audio_boundary_minus_low_boundary,30,0.03333333333333333,3,26,1
+5,L5_shape_only,shape_only,temporal_boundary_minus_low_boundary,30,0.08333333333333333,5,25,0
+5,L5_shape_only,shape_only,visual_boundary_minus_low_boundary,30,-0.016666666666666666,2,25,3
