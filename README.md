@@ -222,6 +222,10 @@ python scripts/analyze_results.py \
 The size analysis reports prompt accuracy, strict both-correct pair accuracy,
 boundary-condition effects, response-position sensitivity, and factorial
 estimates for target size, distractor count, and their interaction.
+Its matched boundary plots are `accuracy_by_size_scene_condition.png` and
+`strict_pair_by_size_scene_condition.png`. The main feature-ablation plots use
+the same `Full / Shape only / Color only / Size only` ordering for prompt
+accuracy and strict pair accuracy.
 
 This produces feature-level accuracy, strict mirrored-pair accuracy, the accuracy-strict gap `d`, position-sensitive pair rates, paired boundary/feature differences, and swap-consistency diagnostics. Report plots include:
 
@@ -400,6 +404,11 @@ Prompt-level accuracy and strict both-correct pair accuracy are treated as
 co-primary descriptive metrics. The strict metric counts a video as correct
 only when both its original and swapped prompt rows are answered correctly,
 which makes it substantially less sensitive to A/B response-position bias.
+
+For analyses containing only one difficulty level, the difficulty-condition
+plots automatically switch to boundary-condition bar charts instead of
+collapsing all points onto one x coordinate. CSV outputs that do not apply to
+the selected experiment scope are omitted rather than written as empty files.
 
 `paired_boundary_summary.csv` compares each non-low boundary condition against `low_boundary` within the same `difficulty_level` and `base_sample_id`, reporting:
 

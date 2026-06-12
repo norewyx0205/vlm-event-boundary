@@ -457,7 +457,7 @@ def size_factorial_effects(size_scene_rows, strict_by_scene):
 def write_csv(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
-        path.write_text("", encoding="utf-8")
+        path.unlink(missing_ok=True)
         return
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
@@ -482,6 +482,44 @@ def make_plot(
     for row in rows:
         grouped[row["condition"]].append(row)
 
+    level_values = sorted({
+        int(row["difficulty_level"])
+        for row in rows
+        if str(row.get("difficulty_level", "")).isdigit()
+    })
+    if len(level_values) == 1:
+        condition_order = [
+            condition
+            for condition in (
+                "low_boundary",
+                "temporal_boundary",
+                "visual_boundary",
+                "audio_boundary",
+            )
+            if condition in grouped
+        ]
+        condition_labels = {
+            "low_boundary": "Low",
+            "temporal_boundary": "Temporal",
+            "visual_boundary": "Visual",
+            "audio_boundary": "Audio",
+        }
+        metric_name = "Strict both-correct" if y_label == "Strict pair" else "Prompt accuracy"
+        values = {
+            (condition_labels.get(condition, condition), metric_name): float(items[0]["accuracy"])
+            for condition, items in grouped.items()
+            if items
+        }
+        make_grouped_bar_plot(
+            [condition_labels.get(condition, condition) for condition in condition_order],
+            [metric_name],
+            values,
+            f"{title} (Level {level_values[0]})",
+            output_path,
+            y_label=y_label,
+        )
+        return
+
     width, height = 1120, 620
     margin_left, margin_right = 95, 290
     margin_top, margin_bottom = 85, 85
@@ -493,7 +531,6 @@ def make_plot(
     cv2.line(image, (margin_left, margin_top), (margin_left, margin_top + plot_h), axis_color, 2)
     cv2.line(image, (margin_left, margin_top + plot_h), (margin_left + plot_w, margin_top + plot_h), axis_color, 2)
 
-    level_values = sorted({int(row["difficulty_level"]) for row in rows if str(row.get("difficulty_level", "")).isdigit()})
     if not level_values:
         level_values = [1]
     min_level = min(level_values)
@@ -557,6 +594,7 @@ def make_feature_plot(
     variants=None,
     labels=None,
     x_axis_label="Feature encoding",
+    y_label="Prompt accuracy",
 ):
     try:
         import cv2
@@ -655,7 +693,7 @@ def make_feature_plot(
         axis_color,
         2,
     )
-    cv2.putText(image, "Accuracy", (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
+    cv2.putText(image, y_label, (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), image)
 
@@ -940,6 +978,16 @@ def main():
     result_files = load_result_files(args.input)
     if not result_files:
         raise FileNotFoundError(f"No raw_results.jsonl files found under {args.input}")
+    if args.dataset_name_prefix:
+        result_files = [
+            path
+            for path in result_files
+            if dataset_name_from_path(path).startswith(args.dataset_name_prefix)
+        ]
+        if not result_files:
+            raise ValueError(
+                f"No raw result files matched dataset_name_prefix={args.dataset_name_prefix!r}."
+            )
     if args.latest_per_dataset:
         result_files = latest_result_files(result_files)
 
@@ -1162,7 +1210,14 @@ def main():
                 output_dir / "accuracy_vs_strict_pair_by_boundary.png",
             )
         if by_feature_condition:
-            make_feature_plot(by_feature_condition, output_dir / "accuracy_by_feature_variant_condition.png")
+            make_feature_plot(
+                by_feature_condition,
+                output_dir / "accuracy_by_feature_variant_condition.png",
+                title="Prompt accuracy by feature variant and boundary",
+                variants=FEATURE_VARIANTS,
+                labels=FEATURE_LABELS,
+                y_label="Prompt accuracy",
+            )
         if strict_by_feature:
             accuracy_strict_values = {}
             for row in strict_by_feature:
@@ -1222,7 +1277,10 @@ def main():
             make_feature_plot(
                 strict_condition_plot_rows,
                 output_dir / "strict_pair_by_feature_variant_condition.png",
-                title="Strict both-correct accuracy by boundary condition",
+                title="Strict both-correct by feature variant and boundary",
+                variants=FEATURE_VARIANTS,
+                labels=FEATURE_LABELS,
+                y_label="Strict pair",
             )
 
         if by_size_scene_condition:
@@ -1241,6 +1299,26 @@ def main():
                 variants=SIZE_SCENE_VARIANTS,
                 labels=SIZE_SCENE_LABELS,
                 x_axis_label="Target size / distractor count",
+                y_label="Prompt accuracy",
+            )
+
+        if strict_by_size_scene_condition:
+            strict_size_boundary_rows = [
+                {
+                    "feature_variant": row["size_scene_variant"],
+                    "condition": row["condition"],
+                    "accuracy": row["strict_both_correct"],
+                }
+                for row in strict_by_size_scene_condition
+            ]
+            make_feature_plot(
+                strict_size_boundary_rows,
+                output_dir / "strict_pair_by_size_scene_condition.png",
+                title="Size-only 2x2 strict both-correct by boundary",
+                variants=SIZE_SCENE_VARIANTS,
+                labels=SIZE_SCENE_LABELS,
+                x_axis_label="Target size / distractor count",
+                y_label="Strict pair",
             )
 
         if strict_by_size_scene:
