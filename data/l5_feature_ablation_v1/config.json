@@ -1,6 +1,7 @@
 {
   "dataset_version": "l5_feature_ablation_v1",
   "samples_per_variant": 30,
+  "size_stress_samples_per_cell": 10,
   "seed": 42,
   "fps": 15,
   "level_durations": [
@@ -17,9 +18,69 @@
   "audio_beep_duration_sec": 0.35,
   "static_distractors": 2,
   "moving_distractors": 2,
-  "variants": [
+  "feature_variants": [
     "full",
     "shape_only",
-    "color_only"
-  ]
+    "color_only",
+    "size_only"
+  ],
+  "generated_variants": [
+    "size_only"
+  ],
+  "size_scene_variants": {
+    "large_few": {
+      "target_size_condition": "large",
+      "distractor_count_condition": "few",
+      "target_radii": [
+        28,
+        50
+      ],
+      "distractor_radii": [
+        38
+      ],
+      "moving_distractors": 1
+    },
+    "large_many": {
+      "target_size_condition": "large",
+      "distractor_count_condition": "many",
+      "target_radii": [
+        28,
+        50
+      ],
+      "distractor_radii": [
+        32,
+        36,
+        42,
+        46
+      ],
+      "moving_distractors": 4
+    },
+    "small_few": {
+      "target_size_condition": "small",
+      "distractor_count_condition": "few",
+      "target_radii": [
+        14,
+        28
+      ],
+      "distractor_radii": [
+        21
+      ],
+      "moving_distractors": 1
+    },
+    "small_many": {
+      "target_size_condition": "small",
+      "distractor_count_condition": "many",
+      "target_radii": [
+        14,
+        28
+      ],
+      "distractor_radii": [
+        18,
+        21,
+        24,
+        26
+      ],
+      "moving_distractors": 4
+    }
+  }
 }

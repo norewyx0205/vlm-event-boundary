@@ -28,7 +28,7 @@ COLORS = {
 DRAW_COLORS = {**COLORS, "black": (0, 0, 0)}
 SHAPES = ["circle", "square", "triangle"]
 DIRECTIONS = ["right", "left", "down", "up"]
-FEATURE_VARIANTS = ("full", "shape_only", "color_only")
+FEATURE_VARIANTS = ("full", "shape_only", "color_only", "size_only")
 
 LEVELS = [
     {
@@ -188,11 +188,13 @@ def fixed_target_paths():
 
 
 def object_text(obj):
+    if obj.get("size_label") in {"small", "large"}:
+        return f"the {obj['size_label']} circle"
     return f"the {obj['color']} {obj['shape']}"
 
 
 def event_text(obj):
-    return f"The {obj['color']} {obj['shape']} moved {obj['path']['direction']}."
+    return f"{object_text(obj).capitalize()} moved {obj['path']['direction']}."
 
 
 def make_motion(path, start_frame, end_frame):
@@ -334,11 +336,18 @@ def render_video(video_path, condition, fps, duration_sec, objects, distractors,
 
         for distractor in distractors:
             x, y = object_position(distractor["motion"], frame_idx)
-            draw_shape(frame, distractor["shape"], distractor["color"], x, y, size=23)
+            draw_shape(
+                frame,
+                distractor["shape"],
+                distractor["color"],
+                x,
+                y,
+                size=distractor.get("radius", 23),
+            )
 
         for obj in objects:
             x, y = object_position(obj["motion"], frame_idx)
-            draw_shape(frame, obj["shape"], obj["color"], x, y)
+            draw_shape(frame, obj["shape"], obj["color"], x, y, size=obj.get("radius", 28))
 
         if (
             condition == "visual_boundary"
@@ -404,7 +413,7 @@ def make_target_objects(level, first_object_id, identity_spec):
     return object_1, object_2, first_object_id, existing
 
 
-def apply_feature_variant(identity_spec, feature_variant):
+def apply_feature_variant(identity_spec, feature_variant, target_radii=None):
     if feature_variant == "full":
         return identity_spec
 
@@ -419,6 +428,20 @@ def apply_feature_variant(identity_spec, feature_variant):
     elif feature_variant == "color_only":
         transformed["object_1"]["shape"] = "circle"
         transformed["object_2"]["shape"] = "circle"
+    elif feature_variant == "size_only":
+        small_radius, large_radius = target_radii or (20, 42)
+        transformed["object_1"].update({
+            "shape": "circle",
+            "color": "black",
+            "radius": small_radius,
+            "size_label": "small",
+        })
+        transformed["object_2"].update({
+            "shape": "circle",
+            "color": "black",
+            "radius": large_radius,
+            "size_label": "large",
+        })
     else:
         raise ValueError(f"Unknown feature variant: {feature_variant}")
     return transformed
@@ -463,7 +486,39 @@ def feature_ablation_distractor_identity(target_objects, idx, feature_variant):
         color = random.choice(available_colors)
         return "circle", color, target["id"], "shape"
 
+    if feature_variant == "size_only":
+        return "circle", "black", target["id"], "size"
+
     return target_like_identity(target_objects, idx)
+
+
+def size_distractor_metadata(target_objects, idx, distractor_radii=None):
+    radii = distractor_radii or (28, 34)
+    radius = radii[idx % len(radii)]
+    small_radius = min(obj["radius"] for obj in target_objects)
+    large_radius = max(obj["radius"] for obj in target_objects)
+    if not small_radius < radius < large_radius:
+        raise ValueError(
+            f"Size-only distractor radius {radius} must be strictly between "
+            f"target radii {small_radius} and {large_radius}."
+        )
+
+    midpoint = (small_radius + large_radius) / 2
+    relative_position = (radius - small_radius) / (large_radius - small_radius)
+    if abs(radius - midpoint) <= max(1, (large_radius - small_radius) * 0.12):
+        size_label = "medium"
+        shared_target_attribute = "size"
+    elif relative_position < 0.5:
+        size_label = "near_small"
+        shared_target_attribute = "near_small"
+    else:
+        size_label = "near_large"
+        shared_target_attribute = "near_large"
+    return {
+        "radius": radius,
+        "size_label": size_label,
+        "shared_target_attribute": shared_target_attribute,
+    }
 
 
 def non_target_identity(target_objects):
@@ -491,13 +546,24 @@ def make_distractors(
     include_unrelated_later,
     feature_variant="full",
     preserve_structure_rng=False,
+    distractor_radii=None,
+    static_count_override=None,
+    moving_count_override=None,
 ):
     distractors = []
 
     static_kind = level["static_distractor_kind"]
     moving_kind = level["moving_distractor_kind"]
-    static_count = random.randint(1, static_distractors) if static_kind != "none" and static_distractors else 0
-    moving_count = random.randint(1, moving_distractors) if moving_kind != "none" and moving_distractors else 0
+    static_count = (
+        static_count_override
+        if static_count_override is not None
+        else random.randint(1, static_distractors) if static_kind != "none" and static_distractors else 0
+    )
+    moving_count = (
+        moving_count_override
+        if moving_count_override is not None
+        else random.randint(1, moving_distractors) if moving_kind != "none" and moving_distractors else 0
+    )
 
     def choose_target_like_identity(idx):
         if not preserve_structure_rng:
@@ -515,7 +581,7 @@ def make_distractors(
             shared_target_attribute = "none"
 
         point = sample_point(existing)
-        distractors.append({
+        distractor = {
             "id": len(distractors) + 1,
             "shape": shape,
             "color": color,
@@ -524,7 +590,14 @@ def make_distractors(
             "matched_target_id": matched_target_id,
             "shared_target_attribute": shared_target_attribute,
             "path": {"direction": "none", "from": point, "to": point},
-        })
+        }
+        if feature_variant == "size_only":
+            distractor.update(size_distractor_metadata(
+                target_objects,
+                idx,
+                distractor_radii,
+            ))
+        distractors.append(distractor)
 
     for idx in range(moving_count):
         if moving_kind == "target_like":
@@ -533,7 +606,7 @@ def make_distractors(
             shape, color, matched_target_id = non_target_identity(target_objects)
             shared_target_attribute = "none"
 
-        distractors.append({
+        distractor = {
             "id": len(distractors) + 1,
             "shape": shape,
             "color": color,
@@ -543,7 +616,14 @@ def make_distractors(
             "shared_target_attribute": shared_target_attribute,
             "motion_timing": level["moving_distractor_timing"],
             "path": sample_path(existing),
-        })
+        }
+        if feature_variant == "size_only":
+            distractor.update(size_distractor_metadata(
+                target_objects,
+                idx + static_count,
+                distractor_radii,
+            ))
+        distractors.append(distractor)
 
     if include_unrelated_later:
         shape, color, matched_target_id = non_target_identity(target_objects)
@@ -647,7 +727,7 @@ def make_eval_rows(video_annotation):
 
 
 def serialize_obj(obj, start_frame, end_frame):
-    return {
+    serialized = {
         "id": obj["id"],
         "shape": obj["shape"],
         "color": obj["color"],
@@ -658,6 +738,11 @@ def serialize_obj(obj, start_frame, end_frame):
         "start_frame": start_frame,
         "end_frame": end_frame,
     }
+    if "radius" in obj:
+        serialized["radius"] = obj["radius"]
+    if "size_label" in obj:
+        serialized["size_label"] = obj["size_label"]
+    return serialized
 
 
 def generate_level(level, args, durations, target_identity_specs):
@@ -680,15 +765,28 @@ def generate_level(level, args, durations, target_identity_specs):
         raise ValueError(f"Unknown feature variant: {feature_variant}")
     first_object_ids = balanced_binary_sequence(1, 2, args.samples_per_level)
     correct_relations = balanced_binary_sequence("before", "after", args.samples_per_level)
+    subject_object_ids = (
+        balanced_binary_sequence(1, 2, args.samples_per_level)
+        if getattr(args, "counterbalance_prompt_subject", False)
+        else None
+    )
 
     for base_id in range(1, args.samples_per_level + 1):
         first_object_id = first_object_ids[base_id - 1] if level["randomized_targets"] else 1
-        identity_spec = apply_feature_variant(target_identity_specs[base_id - 1], feature_variant)
+        identity_spec = apply_feature_variant(
+            target_identity_specs[base_id - 1],
+            feature_variant,
+            target_radii=getattr(args, "target_radii", None),
+        )
         object_1, object_2, first_object_id, existing = make_target_objects(level, first_object_id, identity_spec)
         second_object_id = 2 if first_object_id == 1 else 1
         first_obj = object_1 if first_object_id == 1 else object_2
         second_obj = object_2 if first_object_id == 1 else object_1
-        correct_relation = correct_relations[base_id - 1]
+        if subject_object_ids is None:
+            correct_relation = correct_relations[base_id - 1]
+        else:
+            subject_object_id = subject_object_ids[base_id - 1]
+            correct_relation = "before" if subject_object_id == first_object_id else "after"
         correct_relation, incorrect_relation, correct_sentence, incorrect_sentence = make_sentence_pair(
             first_obj,
             second_obj,
@@ -703,6 +801,9 @@ def generate_level(level, args, durations, target_identity_specs):
             level["include_unrelated_later_motion"] and not args.disable_unrelated_later_motion,
             feature_variant=feature_variant,
             preserve_structure_rng=getattr(args, "paired_feature_ablation", False),
+            distractor_radii=getattr(args, "distractor_radii", None),
+            static_count_override=getattr(args, "static_count_override", None),
+            moving_count_override=getattr(args, "moving_count_override", None),
         )
 
         for condition in CONDITIONS:
@@ -757,11 +858,19 @@ def generate_level(level, args, durations, target_identity_specs):
                     "full": "color_shape_conjunction",
                     "shape_only": "shape",
                     "color_only": "color",
+                    "size_only": "size",
                 }[feature_variant],
+                "size_scene_variant": getattr(args, "size_scene_variant", ""),
+                "target_size_condition": getattr(args, "target_size_condition", ""),
+                "distractor_count_condition": getattr(args, "distractor_count_condition", ""),
                 "condition": condition,
                 "boundary_type": condition.replace("_boundary", ""),
                 "base_sample_id": base_id,
-                "pairing_id": f"l5_feature_sample_{base_id:03d}_{condition}" if level["difficulty_level"] == 5 else "",
+                "pairing_id": (
+                    f"l5_size_scene_{getattr(args, 'size_scene_variant', '')}_sample_{base_id:03d}_{condition}"
+                    if getattr(args, "size_scene_variant", "")
+                    else f"l5_feature_sample_{base_id:03d}_{condition}"
+                ) if level["difficulty_level"] == 5 else "",
                 "video_id": final_video.name,
                 "video_path": str(final_video),
                 "eval_id_base": stem,
@@ -781,11 +890,17 @@ def generate_level(level, args, durations, target_identity_specs):
                         "id": d["id"],
                         "shape": d["shape"],
                         "color": d["color"],
-                        "label": f"the {d['color']} {d['shape']}",
+                        "label": (
+                            f"the {d['size_label']} circle"
+                            if d.get("size_label")
+                            else f"the {d['color']} {d['shape']}"
+                        ),
                         "motion_kind": d["motion_kind"],
                         "distractor_identity": d.get("distractor_identity", "unknown"),
                         "matched_target_id": d.get("matched_target_id"),
                         "shared_target_attribute": d.get("shared_target_attribute", "none"),
+                        "radius": d.get("radius"),
+                        "size_label": d.get("size_label", ""),
                         "motion_timing": d.get("motion_timing", "none"),
                         "direction": d["path"]["direction"],
                         "from": d["path"]["from"],
@@ -796,6 +911,19 @@ def generate_level(level, args, durations, target_identity_specs):
                 "distractor_count": len(distractors),
                 "static_distractor_count": sum(1 for d in distractors if d["motion_kind"] == "static"),
                 "moving_distractor_count": sum(1 for d in distractors if d["motion_kind"] == "unrelated_motion"),
+                "target_1_radius": object_1.get("radius"),
+                "target_2_radius": object_2.get("radius"),
+                "target_1_size_label": object_1.get("size_label", ""),
+                "target_2_size_label": object_2.get("size_label", ""),
+                "distractor_radius": [
+                    d.get("radius") for d in distractors if d.get("radius") is not None
+                ],
+                "distractor_size_label": [
+                    d.get("size_label", "") for d in distractors if d.get("radius") is not None
+                ],
+                "shared_target_attribute": [
+                    d.get("shared_target_attribute", "none") for d in distractors
+                ],
                 "event_timing": {
                     "first_event_start_frame": timing["first_event_start_frame"],
                     "first_event_end_frame": timing["first_event_end_frame"],

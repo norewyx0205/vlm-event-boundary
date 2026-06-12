@@ -127,11 +127,44 @@ Generate the structurally paired Level 5 pilot:
 python scripts/generate_l5_feature_ablation.py \
   --dataset_version l5_feature_ablation_v1 \
   --samples_per_variant 30 \
+  --size_stress_samples_per_cell 10 \
   --output_root data/l5_feature_ablation_v1 \
   --seed 42
 ```
 
-The variants are `L5_full`, `L5_shape_only`, and `L5_color_only`. They share motion paths, event order, distractor timing, and boundary timing; only the visual feature encoding changes.
+The main variants are `L5_full`, `L5_shape_only`, `L5_color_only`, and
+`L5_size_only`. They share motion paths, event order, distractor timing, and
+boundary timing; only the visual feature encoding changes. The main experiment
+contains `30 x 4 x 2 x 4 = 960` prompt evaluations.
+
+`L5_size_only` renders every object as a black circle. The targets are uniquely
+identified by the labels `small` and `large`; every distractor radius lies
+strictly between the two target radii.
+
+To add only the new size datasets without regenerating the existing three main
+variants:
+
+```bash
+python scripts/generate_l5_feature_ablation.py \
+  --dataset_version l5_feature_ablation_v1 \
+  --variants size_only \
+  --samples_per_variant 30 \
+  --size_stress_samples_per_cell 10 \
+  --output_root data/l5_feature_ablation_v1 \
+  --seed 42
+```
+
+The separate `size_stress_pilot/` uses a 2x2 design:
+
+| Scene | Absolute target size | Distractor count |
+| --- | --- | ---: |
+| `large_few` | radii 28 / 50 | 1 |
+| `large_many` | radii 28 / 50 | 4 |
+| `small_few` | radii 14 / 28 | 1 |
+| `small_many` | radii 14 / 28 | 4 |
+
+With 10 base samples per cell, four boundaries, and mirrored prompts, this pilot
+contains `4 x 10 x 4 x 2 = 320` prompt evaluations.
 
 Validate the pilot:
 
@@ -146,22 +179,47 @@ Evaluate all variants:
 python scripts/run_eval.py \
   --annotation_root data/l5_feature_ablation_v1 \
   --model_name Qwen/Qwen3-VL-8B-Instruct \
-  --dataset_name_prefix l5_feature_ablation_v1_ \
+  --dataset_name_prefix l5_feature_ablation_v1_main_ \
   --output_dir results
 ```
 
 `--annotation_root` loads the model once and evaluates every immediate child `annotations.jsonl`. This is substantially faster than launching one process per level or variant.
+
+Evaluate the independent size/crowding pilot:
+
+```bash
+python scripts/run_eval.py \
+  --annotation_root data/l5_feature_ablation_v1/size_stress_pilot \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name_prefix l5_feature_ablation_v1_size_stress_ \
+  --output_dir results
+```
 
 Analyze the latest run for each variant:
 
 ```bash
 python scripts/analyze_results.py \
   --input results \
-  --dataset_name_prefix l5_feature_ablation_v1_ \
+  --dataset_name_prefix l5_feature_ablation_v1_main_ \
   --latest_per_dataset \
   --output_dir analysis/l5_feature_ablation_v1 \
   --plots
 ```
+
+Analyze the 2x2 pilot:
+
+```bash
+python scripts/analyze_results.py \
+  --input results \
+  --dataset_name_prefix l5_feature_ablation_v1_size_stress_ \
+  --latest_per_dataset \
+  --output_dir analysis/l5_feature_ablation_v1_size_stress \
+  --plots
+```
+
+The size analysis reports prompt accuracy, strict both-correct pair accuracy,
+boundary-condition effects, response-position sensitivity, and factorial
+estimates for target size, distractor count, and their interaction.
 
 This produces feature-level accuracy, strict mirrored-pair accuracy, the accuracy-strict gap `d`, position-sensitive pair rates, paired boundary/feature differences, and swap-consistency diagnostics. Report plots include:
 
@@ -318,6 +376,10 @@ The analyzer saves:
 
 - `accuracy_by_difficulty.csv`
 - `accuracy_by_difficulty_condition.csv`
+- `strict_pair_overall.csv`
+- `strict_pair_by_difficulty.csv`
+- `strict_pair_by_condition.csv`
+- `strict_pair_by_difficulty_condition.csv`
 - `accuracy_by_correct_option.csv`
 - `accuracy_by_prompt_variant.csv`
 - `prediction_distribution.csv`
@@ -328,6 +390,14 @@ The analyzer saves:
 - `paired_boundary_details.csv`
 - `summary.json`
 - optional `accuracy_by_difficulty_condition.png`
+- optional `strict_pair_by_difficulty_condition.png`
+- optional `accuracy_vs_strict_pair_by_difficulty.png`
+- optional `accuracy_vs_strict_pair_by_boundary.png`
+
+Prompt-level accuracy and strict both-correct pair accuracy are treated as
+co-primary descriptive metrics. The strict metric counts a video as correct
+only when both its original and swapped prompt rows are answered correctly,
+which makes it substantially less sensitive to A/B response-position bias.
 
 `paired_boundary_summary.csv` compares each non-low boundary condition against `low_boundary` within the same `difficulty_level` and `base_sample_id`, reporting:
 

@@ -11,6 +11,22 @@ except ImportError:
     from common import PROJECT_ROOT, read_jsonl
 
 
+FEATURE_VARIANTS = ("full", "shape_only", "color_only", "size_only")
+FEATURE_LABELS = {
+    "full": "Full",
+    "shape_only": "Shape only",
+    "color_only": "Color only",
+    "size_only": "Size only",
+}
+SIZE_SCENE_VARIANTS = ("large_few", "large_many", "small_few", "small_many")
+SIZE_SCENE_LABELS = {
+    "large_few": "Large / few",
+    "large_many": "Large / many",
+    "small_few": "Small / few",
+    "small_many": "Small / many",
+}
+
+
 def load_result_files(path):
     path = Path(path)
     if path.is_file():
@@ -129,6 +145,9 @@ def swap_consistency(rows):
             "difficulty_level": difficulty_level,
             "difficulty_name": pair["original"].get("difficulty_name", ""),
             "feature_variant": pair["original"].get("feature_variant", ""),
+            "size_scene_variant": pair["original"].get("size_scene_variant", ""),
+            "target_size_condition": pair["original"].get("target_size_condition", ""),
+            "distractor_count_condition": pair["original"].get("distractor_count_condition", ""),
             "condition": condition,
             "video_id": video_id,
             "category": category,
@@ -216,6 +235,7 @@ def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
             str(row.get("difficulty_level", "")),
             row.get("difficulty_name", ""),
             row.get("feature_variant", ""),
+            row.get("size_scene_variant", ""),
             infer_base_sample_id(row),
         )
         by_unit[key][condition].append(int(bool(row.get("is_correct", False))))
@@ -232,6 +252,7 @@ def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
             difficulty_level,
             difficulty_name,
             feature_variant,
+            size_scene_variant,
             base_sample_id,
         ) = key
 
@@ -254,6 +275,7 @@ def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
                 "difficulty_level": difficulty_level,
                 "difficulty_name": difficulty_name,
                 "feature_variant": feature_variant,
+                "size_scene_variant": size_scene_variant,
                 "base_sample_id": base_sample_id,
                 "comparison": f"{condition}_minus_{baseline_condition}",
                 "condition": condition,
@@ -271,19 +293,21 @@ def paired_boundary_comparison(rows, baseline_condition="low_boundary"):
                 row["difficulty_level"],
                 row["difficulty_name"],
                 row["feature_variant"],
+                row["size_scene_variant"],
                 row["comparison"],
             )
         ].append(row)
 
     summary_rows = []
     for key, items in sorted(grouped.items(), key=lambda kv: kv[0]):
-        difficulty_level, difficulty_name, feature_variant, comparison = key
+        difficulty_level, difficulty_name, feature_variant, size_scene_variant, comparison = key
         differences = [item["difference"] for item in items]
         directions = Counter(item["direction"] for item in items)
         summary_rows.append({
             "difficulty_level": difficulty_level,
             "difficulty_name": difficulty_name,
             "feature_variant": feature_variant,
+            "size_scene_variant": size_scene_variant,
             "comparison": comparison,
             "pairs": len(items),
             "mean_difference": mean(differences),
@@ -304,7 +328,7 @@ def paired_feature_comparison(rows):
     by_unit = defaultdict(lambda: defaultdict(list))
     for row in rows:
         feature_variant = row.get("feature_variant", "")
-        if feature_variant not in {"full", "shape_only", "color_only"}:
+        if feature_variant not in FEATURE_VARIANTS or row.get("size_scene_variant"):
             continue
         key = (
             result_model_group(row),
@@ -318,6 +342,9 @@ def paired_feature_comparison(rows):
         ("shape_only", "full"),
         ("color_only", "shape_only"),
         ("color_only", "full"),
+        ("size_only", "full"),
+        ("size_only", "shape_only"),
+        ("size_only", "color_only"),
     ]
     detail_rows = []
     for key, feature_values in by_unit.items():
@@ -368,6 +395,65 @@ def paired_feature_comparison(rows):
     return summary_rows, detail_rows
 
 
+def size_factorial_effects(size_scene_rows, strict_by_scene):
+    prompt_cells = {
+        (row["target_size_condition"], row["distractor_count_condition"]): row["accuracy"]
+        for row in grouped_accuracy(
+            size_scene_rows,
+            ["target_size_condition", "distractor_count_condition"],
+        )
+    }
+    strict_cells = {
+        (row["target_size_condition"], row["distractor_count_condition"]): row["strict_both_correct"]
+        for row in strict_by_scene
+    }
+
+    output = []
+    for measure, cells in [
+        ("prompt_accuracy", prompt_cells),
+        ("strict_both_correct", strict_cells),
+    ]:
+        required = {
+            ("large", "few"),
+            ("large", "many"),
+            ("small", "few"),
+            ("small", "many"),
+        }
+        if not required.issubset(cells):
+            continue
+        large = mean([cells[("large", "few")], cells[("large", "many")]])
+        small = mean([cells[("small", "few")], cells[("small", "many")]])
+        few = mean([cells[("large", "few")], cells[("small", "few")]])
+        many = mean([cells[("large", "many")], cells[("small", "many")]])
+        interaction = (
+            cells[("small", "many")]
+            - cells[("small", "few")]
+            - cells[("large", "many")]
+            + cells[("large", "few")]
+        )
+        output.extend([
+            {
+                "measure": measure,
+                "effect": "large_minus_small",
+                "estimate": large - small,
+                "interpretation": "positive means larger targets are easier",
+            },
+            {
+                "measure": measure,
+                "effect": "few_minus_many",
+                "estimate": few - many,
+                "interpretation": "positive means fewer distractors are easier",
+            },
+            {
+                "measure": measure,
+                "effect": "small_x_many_interaction",
+                "estimate": interaction,
+                "interpretation": "negative means the small+many combination has an extra cost",
+            },
+        ])
+    return output
+
+
 def write_csv(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
@@ -379,7 +465,12 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
-def make_plot(rows, output_path):
+def make_plot(
+    rows,
+    output_path,
+    title="Accuracy by difficulty level and boundary condition",
+    y_label="Accuracy",
+):
     try:
         import cv2
         import numpy as np
@@ -451,15 +542,22 @@ def make_plot(rows, output_path):
         cv2.line(image, (lx, ly), (lx + 30, ly), color, 3)
         cv2.putText(image, condition, (lx + 38, ly + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, axis_color, 1)
 
-    cv2.putText(image, "Accuracy by difficulty level and boundary condition", (margin_left + 30, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.75, axis_color, 2)
+    cv2.putText(image, title, (margin_left + 30, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.75, axis_color, 2)
     cv2.putText(image, "Difficulty level", (margin_left + plot_w // 2 - 80, height - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, axis_color, 2)
-    cv2.putText(image, "Accuracy", (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
+    cv2.putText(image, y_label, (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), image)
 
 
-def make_feature_plot(rows, output_path, title="Level 5 feature ablation by boundary condition"):
+def make_feature_plot(
+    rows,
+    output_path,
+    title="Level 5 feature ablation by boundary condition",
+    variants=None,
+    labels=None,
+    x_axis_label="Feature encoding",
+):
     try:
         import cv2
         import numpy as np
@@ -467,12 +565,8 @@ def make_feature_plot(rows, output_path, title="Level 5 feature ablation by boun
         print("opencv-python and numpy are required for plots; skipping feature plot.")
         return
 
-    variants = ["full", "shape_only", "color_only"]
-    labels = {
-        "full": "Full",
-        "shape_only": "Shape only",
-        "color_only": "Color only",
-    }
+    variants = list(variants or FEATURE_VARIANTS)
+    labels = labels or FEATURE_LABELS
     grouped = defaultdict(dict)
     for row in rows:
         grouped[row["condition"]][row["feature_variant"]] = float(row["accuracy"])
@@ -490,13 +584,13 @@ def make_feature_plot(rows, output_path, title="Level 5 feature ablation by boun
 
     x_positions = {}
     for idx, variant in enumerate(variants):
-        x = margin_left + round(idx / (len(variants) - 1) * plot_w)
+        x = margin_left + round(idx / max(1, len(variants) - 1) * plot_w)
         x_positions[variant] = x
         cv2.line(image, (x, margin_top + plot_h), (x, margin_top + plot_h + 6), axis_color, 1)
         cv2.putText(
             image,
             labels[variant],
-            (x - 48, margin_top + plot_h + 32),
+            (x - max(36, len(labels[variant]) * 5), margin_top + plot_h + 32),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             axis_color,
@@ -552,7 +646,15 @@ def make_feature_plot(rows, output_path, title="Level 5 feature ablation by boun
         axis_color,
         2,
     )
-    cv2.putText(image, "Feature encoding", (margin_left + plot_w // 2 - 75, height - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.65, axis_color, 2)
+    cv2.putText(
+        image,
+        x_axis_label,
+        (margin_left + plot_w // 2 - max(60, len(x_axis_label) * 5), height - 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.65,
+        axis_color,
+        2,
+    )
     cv2.putText(image, "Accuracy", (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), image)
@@ -629,7 +731,7 @@ def make_grouped_bar_plot(categories, series, values, title, output_path, y_labe
     cv2.imwrite(str(output_path), image)
 
 
-def make_pair_outcome_plot(rows, output_path):
+def make_pair_outcome_plot(rows, output_path, variants=None, labels=None, title=None):
     try:
         import cv2
         import numpy as np
@@ -637,8 +739,8 @@ def make_pair_outcome_plot(rows, output_path):
         print("opencv-python and numpy are required for plots; skipping pair outcome plot.")
         return
 
-    variants = ["full", "shape_only", "color_only"]
-    labels = {"full": "Full", "shape_only": "Shape only", "color_only": "Color only"}
+    variants = list(variants or FEATURE_VARIANTS)
+    labels = labels or FEATURE_LABELS
     categories = ["both_correct", "exactly_one_correct", "both_wrong"]
     colors = {
         "both_correct": (44, 160, 44),
@@ -695,7 +797,7 @@ def make_pair_outcome_plot(rows, output_path):
         cv2.putText(
             image,
             labels[variant],
-            (round(center - 48), margin_top + plot_h + 34),
+            (round(center - max(36, len(labels[variant]) * 5)), margin_top + plot_h + 34),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
             axis_color,
@@ -714,8 +816,114 @@ def make_pair_outcome_plot(rows, output_path):
         cv2.rectangle(image, (legend_x, y - 12), (legend_x + 25, y + 8), colors[category], -1)
         cv2.putText(image, legend_labels[category], (legend_x + 36, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, axis_color, 1)
 
-    cv2.putText(image, "Mirrored-pair outcomes by feature condition", (margin_left, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.72, axis_color, 2)
+    cv2.putText(
+        image,
+        title or "Mirrored-pair outcomes by feature condition",
+        (margin_left, 42),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.72,
+        axis_color,
+        2,
+    )
     cv2.putText(image, "Proportion", (12, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.58, axis_color, 2)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), image)
+
+
+def make_size_interaction_plot(rows, value_key, title, output_path):
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        print("opencv-python and numpy are required for plots; skipping size interaction plot.")
+        return
+
+    values = {
+        (row["target_size_condition"], row["distractor_count_condition"]): row[value_key]
+        for row in rows
+    }
+    if not all(
+        (size, count) in values
+        for size in ("large", "small")
+        for count in ("few", "many")
+    ):
+        return
+
+    width, height = 980, 620
+    margin_left, margin_right = 100, 250
+    margin_top, margin_bottom = 90, 95
+    plot_w = width - margin_left - margin_right
+    plot_h = height - margin_top - margin_bottom
+    image = np.ones((height, width, 3), dtype=np.uint8) * 255
+    axis_color = (40, 40, 40)
+
+    for rate in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        y = margin_top + plot_h - round(rate * plot_h)
+        cv2.line(image, (margin_left, y), (margin_left + plot_w, y), (225, 225, 225), 1)
+        cv2.putText(image, f"{rate:.2f}", (20, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, axis_color, 1)
+    cv2.line(image, (margin_left, margin_top), (margin_left, margin_top + plot_h), axis_color, 2)
+    cv2.line(image, (margin_left, margin_top + plot_h), (margin_left + plot_w, margin_top + plot_h), axis_color, 2)
+
+    x_positions = {
+        "few": margin_left + round(plot_w * 0.18),
+        "many": margin_left + round(plot_w * 0.82),
+    }
+    for count, label in [("few", "Few distractors"), ("many", "Many distractors")]:
+        x = x_positions[count]
+        cv2.line(image, (x, margin_top + plot_h), (x, margin_top + plot_h + 6), axis_color, 1)
+        cv2.putText(
+            image,
+            label,
+            (x - 72, margin_top + plot_h + 34),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.56,
+            axis_color,
+            1,
+        )
+
+    series = [
+        ("large", "Large targets", (31, 119, 180)),
+        ("small", "Small targets", (44, 160, 44)),
+    ]
+    for series_index, (size, label, color) in enumerate(series):
+        x_offset = -4 if series_index == 0 else 4
+        points = []
+        for count in ("few", "many"):
+            value = float(values[(size, count)])
+            x = x_positions[count] + x_offset
+            y = margin_top + plot_h - round(value * plot_h)
+            points.append((x, y))
+            cv2.circle(image, (x, y), 7, color, -1)
+            cv2.putText(
+                image,
+                f"{value:.2f}",
+                (x - 22, max(margin_top + 18, y - 12)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.52,
+                axis_color,
+                1,
+            )
+        cv2.line(image, points[0], points[1], color, 3)
+
+    legend_x = margin_left + plot_w + 35
+    cv2.putText(image, "Target size", (legend_x, margin_top - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis_color, 2)
+    for idx, (_, label, color) in enumerate(series):
+        y = margin_top + 14 + idx * 36
+        cv2.line(image, (legend_x, y), (legend_x + 30, y), color, 3)
+        cv2.circle(image, (legend_x + 15, y), 5, color, -1)
+        cv2.putText(image, label, (legend_x + 42, y + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.52, axis_color, 1)
+
+    cv2.putText(image, title, (margin_left, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.72, axis_color, 2)
+    cv2.putText(image, "Accuracy", (14, margin_top - 25), cv2.FONT_HERSHEY_SIMPLEX, 0.58, axis_color, 2)
+    cv2.putText(
+        image,
+        "Distractor count",
+        (margin_left + plot_w // 2 - 75, height - 22),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.62,
+        axis_color,
+        2,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), image)
 
@@ -752,25 +960,81 @@ def main():
         ["difficulty_level", "difficulty_name", "condition"],
         "category",
     )
+    strict_overall = strict_pair_metrics(rows, swap_details, [])
+    strict_by_difficulty = strict_pair_metrics(rows, swap_details, ["difficulty_level"])
+    strict_by_condition = strict_pair_metrics(rows, swap_details, ["condition"])
+    strict_by_difficulty_condition = strict_pair_metrics(
+        rows,
+        swap_details,
+        ["difficulty_level", "condition"],
+    )
     paired_summary, paired_details = paired_boundary_comparison(rows)
-    feature_rows = [row for row in rows if row.get("feature_variant") in {"full", "shape_only", "color_only"}]
+    feature_rows = [
+        row
+        for row in rows
+        if row.get("feature_variant") in FEATURE_VARIANTS
+        and not row.get("size_scene_variant")
+    ]
+    size_scene_rows = [row for row in rows if row.get("size_scene_variant") in SIZE_SCENE_VARIANTS]
     by_feature = grouped_accuracy(feature_rows, ["feature_variant"]) if feature_rows else []
     by_feature_condition = grouped_accuracy(feature_rows, ["feature_variant", "condition"]) if feature_rows else []
     by_feature_correct_option = grouped_accuracy(feature_rows, ["feature_variant", "correct_option"]) if feature_rows else []
     by_feature_prompt_variant = grouped_accuracy(feature_rows, ["feature_variant", "prompt_variant"]) if feature_rows else []
+    feature_swap_details = [
+        row
+        for row in swap_details
+        if row.get("feature_variant") in FEATURE_VARIANTS
+        and not row.get("size_scene_variant")
+    ]
+    size_scene_swap_details = [
+        row for row in swap_details if row.get("size_scene_variant") in SIZE_SCENE_VARIANTS
+    ]
     swap_by_feature_condition = grouped_counts(
-        [row for row in swap_details if row.get("feature_variant")],
+        feature_swap_details,
         ["feature_variant", "condition"],
         "category",
     )
-    strict_by_feature = strict_pair_metrics(feature_rows, swap_details, ["feature_variant"])
+    strict_by_feature = strict_pair_metrics(feature_rows, feature_swap_details, ["feature_variant"])
     strict_by_feature_condition = strict_pair_metrics(
         feature_rows,
-        swap_details,
+        feature_swap_details,
         ["feature_variant", "condition"],
     )
-    strict_overall = strict_pair_metrics(feature_rows, swap_details, [])
     paired_feature_summary, paired_feature_details = paired_feature_comparison(feature_rows)
+    by_size_scene = (
+        grouped_accuracy(
+            size_scene_rows,
+            ["size_scene_variant", "target_size_condition", "distractor_count_condition"],
+        )
+        if size_scene_rows else []
+    )
+    by_size_scene_condition = (
+        grouped_accuracy(
+            size_scene_rows,
+            [
+                "size_scene_variant",
+                "target_size_condition",
+                "distractor_count_condition",
+                "condition",
+            ],
+        )
+        if size_scene_rows else []
+    )
+    by_size_scene_correct_option = (
+        grouped_accuracy(size_scene_rows, ["size_scene_variant", "correct_option"])
+        if size_scene_rows else []
+    )
+    strict_by_size_scene = strict_pair_metrics(
+        size_scene_rows,
+        size_scene_swap_details,
+        ["size_scene_variant", "target_size_condition", "distractor_count_condition"],
+    )
+    strict_by_size_scene_condition = strict_pair_metrics(
+        size_scene_rows,
+        size_scene_swap_details,
+        ["size_scene_variant", "condition"],
+    )
+    size_factorial_summary = size_factorial_effects(size_scene_rows, strict_by_size_scene)
 
     write_csv(output_dir / "accuracy_by_difficulty.csv", by_difficulty)
     write_csv(output_dir / "accuracy_by_difficulty_condition.csv", by_difficulty_condition)
@@ -780,6 +1044,13 @@ def main():
     write_csv(output_dir / "swap_consistency_summary.csv", swap_summary)
     write_csv(output_dir / "swap_consistency_details.csv", swap_details)
     write_csv(output_dir / "swap_consistency_by_level_condition.csv", swap_by_level_condition)
+    write_csv(output_dir / "strict_pair_overall.csv", strict_overall)
+    write_csv(output_dir / "strict_pair_by_difficulty.csv", strict_by_difficulty)
+    write_csv(output_dir / "strict_pair_by_condition.csv", strict_by_condition)
+    write_csv(
+        output_dir / "strict_pair_by_difficulty_condition.csv",
+        strict_by_difficulty_condition,
+    )
     write_csv(output_dir / "paired_boundary_summary.csv", paired_summary)
     write_csv(output_dir / "paired_boundary_details.csv", paired_details)
     write_csv(output_dir / "accuracy_by_feature_variant.csv", by_feature)
@@ -789,9 +1060,14 @@ def main():
     write_csv(output_dir / "swap_consistency_by_feature_condition.csv", swap_by_feature_condition)
     write_csv(output_dir / "strict_pair_by_feature_variant.csv", strict_by_feature)
     write_csv(output_dir / "strict_pair_by_feature_variant_condition.csv", strict_by_feature_condition)
-    write_csv(output_dir / "strict_pair_overall.csv", strict_overall)
     write_csv(output_dir / "paired_feature_summary.csv", paired_feature_summary)
     write_csv(output_dir / "paired_feature_details.csv", paired_feature_details)
+    write_csv(output_dir / "accuracy_by_size_scene.csv", by_size_scene)
+    write_csv(output_dir / "accuracy_by_size_scene_condition.csv", by_size_scene_condition)
+    write_csv(output_dir / "accuracy_by_size_scene_correct_option.csv", by_size_scene_correct_option)
+    write_csv(output_dir / "strict_pair_by_size_scene.csv", strict_by_size_scene)
+    write_csv(output_dir / "strict_pair_by_size_scene_condition.csv", strict_by_size_scene_condition)
+    write_csv(output_dir / "size_factorial_effects.csv", size_factorial_summary)
 
     summary = {
         "input": args.input,
@@ -804,6 +1080,10 @@ def main():
         "accuracy_by_prompt_variant": by_prompt_variant,
         "prediction_distribution": pred_dist,
         "swap_consistency": swap_summary,
+        "strict_pair_overall": strict_overall,
+        "strict_pair_by_difficulty": strict_by_difficulty,
+        "strict_pair_by_condition": strict_by_condition,
+        "strict_pair_by_difficulty_condition": strict_by_difficulty_condition,
         "paired_boundary_summary": paired_summary,
         "accuracy_by_feature_variant": by_feature,
         "accuracy_by_feature_variant_condition": by_feature_condition,
@@ -811,28 +1091,86 @@ def main():
         "accuracy_by_feature_variant_prompt_variant": by_feature_prompt_variant,
         "strict_pair_by_feature_variant": strict_by_feature,
         "strict_pair_by_feature_variant_condition": strict_by_feature_condition,
-        "strict_pair_overall": strict_overall,
         "paired_feature_summary": paired_feature_summary,
+        "accuracy_by_size_scene": by_size_scene,
+        "accuracy_by_size_scene_condition": by_size_scene_condition,
+        "accuracy_by_size_scene_correct_option": by_size_scene_correct_option,
+        "strict_pair_by_size_scene": strict_by_size_scene,
+        "strict_pair_by_size_scene_condition": strict_by_size_scene_condition,
+        "size_factorial_effects": size_factorial_summary,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if args.plots:
         make_plot(by_difficulty_condition, output_dir / "accuracy_by_difficulty_condition.png")
+        if strict_by_difficulty_condition:
+            make_plot(
+                [
+                    {
+                        "difficulty_level": row["difficulty_level"],
+                        "condition": row["condition"],
+                        "accuracy": row["strict_both_correct"],
+                    }
+                    for row in strict_by_difficulty_condition
+                ],
+                output_dir / "strict_pair_by_difficulty_condition.png",
+                title="Strict both-correct by difficulty level and boundary",
+                y_label="Strict pair",
+            )
+        if strict_by_difficulty:
+            difficulty_values = {}
+            difficulty_categories = []
+            for row in strict_by_difficulty:
+                label = f"Level {row['difficulty_level']}"
+                difficulty_categories.append(label)
+                difficulty_values[(label, "Prompt accuracy")] = row["prompt_accuracy"]
+                difficulty_values[(label, "Strict both-correct")] = row["strict_both_correct"]
+            make_grouped_bar_plot(
+                difficulty_categories,
+                ["Prompt accuracy", "Strict both-correct"],
+                difficulty_values,
+                "Prompt accuracy versus strict pair accuracy by difficulty",
+                output_dir / "accuracy_vs_strict_pair_by_difficulty.png",
+            )
+        if strict_by_condition:
+            condition_labels = {
+                "low_boundary": "Low",
+                "temporal_boundary": "Temporal",
+                "visual_boundary": "Visual",
+                "audio_boundary": "Audio",
+            }
+            condition_order = [
+                condition
+                for condition in (
+                    "low_boundary",
+                    "temporal_boundary",
+                    "visual_boundary",
+                    "audio_boundary",
+                )
+                if any(row["condition"] == condition for row in strict_by_condition)
+            ]
+            condition_values = {}
+            for row in strict_by_condition:
+                label = condition_labels.get(row["condition"], row["condition"])
+                condition_values[(label, "Prompt accuracy")] = row["prompt_accuracy"]
+                condition_values[(label, "Strict both-correct")] = row["strict_both_correct"]
+            make_grouped_bar_plot(
+                [condition_labels.get(condition, condition) for condition in condition_order],
+                ["Prompt accuracy", "Strict both-correct"],
+                condition_values,
+                "Prompt accuracy versus strict pair accuracy by boundary",
+                output_dir / "accuracy_vs_strict_pair_by_boundary.png",
+            )
         if by_feature_condition:
             make_feature_plot(by_feature_condition, output_dir / "accuracy_by_feature_variant_condition.png")
         if strict_by_feature:
-            feature_labels = {
-                "full": "Full",
-                "shape_only": "Shape only",
-                "color_only": "Color only",
-            }
             accuracy_strict_values = {}
             for row in strict_by_feature:
-                label = feature_labels[row["feature_variant"]]
+                label = FEATURE_LABELS[row["feature_variant"]]
                 accuracy_strict_values[(label, "Prompt accuracy")] = row["prompt_accuracy"]
                 accuracy_strict_values[(label, "Strict both-correct")] = row["strict_both_correct"]
             make_grouped_bar_plot(
-                ["Full", "Shape only", "Color only"],
+                [FEATURE_LABELS[variant] for variant in FEATURE_VARIANTS],
                 ["Prompt accuracy", "Strict both-correct"],
                 accuracy_strict_values,
                 "Prompt accuracy versus strict mirrored-pair accuracy",
@@ -847,10 +1185,10 @@ def main():
 
             correct_option_values = {}
             for row in by_feature_correct_option:
-                label = feature_labels[row["feature_variant"]]
+                label = FEATURE_LABELS[row["feature_variant"]]
                 correct_option_values[(label, f"Correct option {row['correct_option']}")] = row["accuracy"]
             make_grouped_bar_plot(
-                ["Full", "Shape only", "Color only"],
+                [FEATURE_LABELS[variant] for variant in FEATURE_VARIANTS],
                 ["Correct option A", "Correct option B"],
                 correct_option_values,
                 "Response-position sensitivity by feature condition",
@@ -861,11 +1199,11 @@ def main():
             for row in by_feature_condition:
                 if row["condition"] not in {"low_boundary", "visual_boundary"}:
                     continue
-                label = feature_labels[row["feature_variant"]]
+                label = FEATURE_LABELS[row["feature_variant"]]
                 series_name = "Low boundary" if row["condition"] == "low_boundary" else "Visual boundary"
                 visual_values[(label, series_name)] = row["accuracy"]
             make_grouped_bar_plot(
-                ["Full", "Shape only", "Color only"],
+                [FEATURE_LABELS[variant] for variant in FEATURE_VARIANTS],
                 ["Low boundary", "Visual boundary"],
                 visual_values,
                 "Visual-boundary effect by feature condition",
@@ -885,6 +1223,62 @@ def main():
                 strict_condition_plot_rows,
                 output_dir / "strict_pair_by_feature_variant_condition.png",
                 title="Strict both-correct accuracy by boundary condition",
+            )
+
+        if by_size_scene_condition:
+            size_boundary_rows = [
+                {
+                    "feature_variant": row["size_scene_variant"],
+                    "condition": row["condition"],
+                    "accuracy": row["accuracy"],
+                }
+                for row in by_size_scene_condition
+            ]
+            make_feature_plot(
+                size_boundary_rows,
+                output_dir / "accuracy_by_size_scene_condition.png",
+                title="Size-only 2x2 pilot by boundary condition",
+                variants=SIZE_SCENE_VARIANTS,
+                labels=SIZE_SCENE_LABELS,
+                x_axis_label="Target size / distractor count",
+            )
+
+        if strict_by_size_scene:
+            scene_accuracy_values = {}
+            for row in strict_by_size_scene:
+                label = SIZE_SCENE_LABELS[row["size_scene_variant"]]
+                scene_accuracy_values[(label, "Prompt accuracy")] = row["prompt_accuracy"]
+                scene_accuracy_values[(label, "Strict both-correct")] = row["strict_both_correct"]
+            make_grouped_bar_plot(
+                [SIZE_SCENE_LABELS[variant] for variant in SIZE_SCENE_VARIANTS],
+                ["Prompt accuracy", "Strict both-correct"],
+                scene_accuracy_values,
+                "Size-only scene accuracy versus strict pair accuracy",
+                output_dir / "accuracy_vs_strict_pair_by_size_scene.png",
+            )
+
+            scene_pair_rows = [
+                {**row, "feature_variant": row["size_scene_variant"]}
+                for row in strict_by_size_scene
+            ]
+            make_pair_outcome_plot(
+                scene_pair_rows,
+                output_dir / "pair_outcomes_by_size_scene.png",
+                variants=SIZE_SCENE_VARIANTS,
+                labels=SIZE_SCENE_LABELS,
+                title="Mirrored-pair outcomes in the size-only 2x2 pilot",
+            )
+            make_size_interaction_plot(
+                by_size_scene,
+                "accuracy",
+                "Target-size and distractor-count interaction: prompt accuracy",
+                output_dir / "size_crowding_interaction_prompt_accuracy.png",
+            )
+            make_size_interaction_plot(
+                strict_by_size_scene,
+                "strict_both_correct",
+                "Target-size and distractor-count interaction: strict pair accuracy",
+                output_dir / "size_crowding_interaction_strict_pair.png",
             )
 
     print(f"Analyzed {len(rows)} rows from {len(result_files)} raw result file(s).")
