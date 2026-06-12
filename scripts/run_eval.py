@@ -50,6 +50,8 @@ KEY_FIELDS = [
     "target_2_radius",
     "target_1_size_label",
     "target_2_size_label",
+    "target_1_reference_label",
+    "target_2_reference_label",
     "distractor_radius",
     "distractor_size_label",
     "shared_target_attribute",

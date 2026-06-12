@@ -171,7 +171,7 @@ def write_readme(args):
         "| `L5_full` | color and shape conjunction |",
         "| `L5_shape_only` | all objects black; shape identifies each target |",
         "| `L5_color_only` | all objects circles; color identifies each target |",
-        "| `L5_size_only` | all objects are black circles; target radius identifies small versus large |",
+        "| `L5_size_only` | all objects are black circles; prompts identify the smallest versus largest circle |",
         "",
         "Each main variant contains 30 base samples, four boundary conditions, and mirrored original/swapped prompts.",
         "",
@@ -189,7 +189,7 @@ def write_readme(args):
         )
     lines.extend([
         "",
-        "Every distractor radius lies strictly between the small and large target radii, so both target descriptions remain unique.",
+        "Every distractor radius lies strictly between the target radii, so `the smallest circle` and `the largest circle` each identify exactly one target.",
     ])
     output_root.mkdir(parents=True, exist_ok=True)
     (output_root / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

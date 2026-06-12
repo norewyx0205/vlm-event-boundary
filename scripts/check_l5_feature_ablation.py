@@ -109,9 +109,16 @@ def identity_errors(row):
             errors.append("target_1_radius does not match target metadata")
         if row.get("target_2_radius") != targets[1].get("radius"):
             errors.append("target_2_radius does not match target metadata")
+        references = {obj.get("reference_label") for obj in targets}
+        if references != {"smallest", "largest"}:
+            errors.append("size_only targets must have unique smallest/largest reference labels")
+        if row.get("target_1_reference_label") != targets[0].get("reference_label"):
+            errors.append("target_1_reference_label does not match target metadata")
+        if row.get("target_2_reference_label") != targets[1].get("reference_label"):
+            errors.append("target_2_reference_label does not match target metadata")
         prompt_text = f"{row.get('option_A', '')} {row.get('option_B', '')}".lower()
-        if "small circle" not in prompt_text or "large circle" not in prompt_text:
-            errors.append("size_only prompt does not refer to small and large circles")
+        if "smallest circle" not in prompt_text or "largest circle" not in prompt_text:
+            errors.append("size_only prompt does not use unique smallest/largest references")
 
     return errors
 
@@ -170,7 +177,7 @@ def balance_errors(rows, label):
         targets = {obj["id"]: obj for obj in row["target_objects"]}
         first_labels.append(targets[row["first_object_id"]].get("size_label"))
         sentence = row["correct_sentence"].lower()
-        subject_labels.append("small" if sentence.startswith("the small circle") else "large")
+        subject_labels.append("small" if sentence.startswith("the smallest circle") else "large")
 
     errors = []
     for field_name, values in [("first mover", first_labels), ("prompt subject", subject_labels)]:

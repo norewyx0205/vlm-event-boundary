@@ -188,8 +188,8 @@ def fixed_target_paths():
 
 
 def object_text(obj):
-    if obj.get("size_label") in {"small", "large"}:
-        return f"the {obj['size_label']} circle"
+    if obj.get("reference_label") in {"smallest", "largest"}:
+        return f"the {obj['reference_label']} circle"
     return f"the {obj['color']} {obj['shape']}"
 
 
@@ -435,12 +435,14 @@ def apply_feature_variant(identity_spec, feature_variant, target_radii=None):
             "color": "black",
             "radius": small_radius,
             "size_label": "small",
+            "reference_label": "smallest",
         })
         transformed["object_2"].update({
             "shape": "circle",
             "color": "black",
             "radius": large_radius,
             "size_label": "large",
+            "reference_label": "largest",
         })
     else:
         raise ValueError(f"Unknown feature variant: {feature_variant}")
@@ -742,6 +744,8 @@ def serialize_obj(obj, start_frame, end_frame):
         serialized["radius"] = obj["radius"]
     if "size_label" in obj:
         serialized["size_label"] = obj["size_label"]
+    if "reference_label" in obj:
+        serialized["reference_label"] = obj["reference_label"]
     return serialized
 
 
@@ -915,6 +919,8 @@ def generate_level(level, args, durations, target_identity_specs):
                 "target_2_radius": object_2.get("radius"),
                 "target_1_size_label": object_1.get("size_label", ""),
                 "target_2_size_label": object_2.get("size_label", ""),
+                "target_1_reference_label": object_1.get("reference_label", ""),
+                "target_2_reference_label": object_2.get("reference_label", ""),
                 "distractor_radius": [
                     d.get("radius") for d in distractors if d.get("radius") is not None
                 ],

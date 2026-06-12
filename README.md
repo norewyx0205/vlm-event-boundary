@@ -137,9 +137,11 @@ The main variants are `L5_full`, `L5_shape_only`, `L5_color_only`, and
 boundary timing; only the visual feature encoding changes. The main experiment
 contains `30 x 4 x 2 x 4 = 960` prompt evaluations.
 
-`L5_size_only` renders every object as a black circle. The targets are uniquely
-identified by the labels `small` and `large`; every distractor radius lies
-strictly between the two target radii.
+`L5_size_only` renders every object as a black circle. Prompts refer to the
+targets as `the smallest circle` and `the largest circle`; every distractor
+radius lies strictly between the two target radii. The annotation-level
+experimental labels remain `small` and `large`, while
+`target_*_reference_label` records the unambiguous prompt wording.
 
 To add only the new size datasets without regenerating the existing three main
 variants:
