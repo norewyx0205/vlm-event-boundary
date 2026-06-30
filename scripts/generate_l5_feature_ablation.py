@@ -63,6 +63,41 @@ SIZE_SCENE_CONFIGS = {
     },
 }
 
+CLEAR_SIZE_SCENE_CONFIGS = {
+    "clear_large_few": {
+        "target_size_condition": "large",
+        "distractor_count_condition": "few",
+        "size_contrast_condition": "clear",
+        "target_radii": (28, 72),
+        "distractor_radii": (46,),
+        "moving_distractors": 1,
+    },
+    "clear_large_many": {
+        "target_size_condition": "large",
+        "distractor_count_condition": "many",
+        "size_contrast_condition": "clear",
+        "target_radii": (28, 72),
+        "distractor_radii": (40, 46, 52, 58),
+        "moving_distractors": 4,
+    },
+    "clear_small_few": {
+        "target_size_condition": "small",
+        "distractor_count_condition": "few",
+        "size_contrast_condition": "clear",
+        "target_radii": (14, 48),
+        "distractor_radii": (30,),
+        "moving_distractors": 1,
+    },
+    "clear_small_many": {
+        "target_size_condition": "small",
+        "distractor_count_condition": "many",
+        "size_contrast_condition": "clear",
+        "target_radii": (14, 48),
+        "distractor_radii": (24, 30, 36, 40),
+        "moving_distractors": 4,
+    },
+}
+
 
 def parse_variants(value):
     variants = [part.strip() for part in value.split(",") if part.strip()]
@@ -88,7 +123,7 @@ def feature_level(base_level, feature_variant):
 
 
 def generate_feature_variants(args, base_level):
-    if args.size_stress_only:
+    if args.size_stress_only or args.size_clear_contrast_only:
         return
 
     for feature_variant in args.variants:
@@ -108,6 +143,7 @@ def generate_feature_variants(args, base_level):
             static_count_override=None,
             moving_count_override=None,
             size_scene_variant="",
+            size_contrast_condition="main",
             target_size_condition="",
             distractor_count_condition="",
         )
@@ -120,7 +156,7 @@ def generate_feature_variants(args, base_level):
 
 
 def generate_size_stress_pilot(args, base_level):
-    if args.skip_size_stress_pilot:
+    if args.skip_size_stress_pilot or args.size_clear_contrast_only:
         return
 
     pilot_root = Path(args.output_root) / "size_stress_pilot"
@@ -140,6 +176,7 @@ def generate_size_stress_pilot(args, base_level):
             static_count_override=0,
             moving_count_override=config["moving_distractors"],
             size_scene_variant=scene_name,
+            size_contrast_condition="original",
             target_size_condition=config["target_size_condition"],
             distractor_count_condition=config["distractor_count_condition"],
         )
@@ -149,6 +186,44 @@ def generate_size_stress_pilot(args, base_level):
             "sample_prefix": f"l5_size_only_{scene_name}",
             "description": (
                 "Level 5 size-only 2x2 pilot: "
+                f"{config['target_size_condition']} targets, "
+                f"{config['distractor_count_condition']} distractors"
+            ),
+        }
+        generate_level(level, scene_args, args.level_durations, target_identity_specs)
+
+
+def generate_size_clear_contrast_pilot(args, base_level):
+    if args.skip_size_clear_contrast_pilot or args.size_stress_only:
+        return
+
+    pilot_root = Path(args.output_root) / "size_clear_contrast_pilot"
+    for scene_name, config in CLEAR_SIZE_SCENE_CONFIGS.items():
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        target_identity_specs = make_target_identity_specs(args.size_clear_contrast_samples_per_cell)
+        scene_args = clone_args(
+            args,
+            output_root=str(pilot_root),
+            samples_per_level=args.size_clear_contrast_samples_per_cell,
+            paired_feature_ablation=False,
+            counterbalance_prompt_subject=True,
+            feature_variant="size_only",
+            target_radii=config["target_radii"],
+            distractor_radii=config["distractor_radii"],
+            static_count_override=0,
+            moving_count_override=config["moving_distractors"],
+            size_scene_variant=scene_name,
+            size_contrast_condition=config["size_contrast_condition"],
+            target_size_condition=config["target_size_condition"],
+            distractor_count_condition=config["distractor_count_condition"],
+        )
+        level = {
+            **base_level,
+            "difficulty_name": f"L5_size_only_{scene_name}",
+            "sample_prefix": f"l5_size_only_{scene_name}",
+            "description": (
+                "Level 5 size-only clear-contrast pilot: "
                 f"{config['target_size_condition']} targets, "
                 f"{config['distractor_count_condition']} distractors"
             ),
@@ -189,6 +264,20 @@ def write_readme(args):
         )
     lines.extend([
         "",
+        "## Size-only clear-contrast pilot",
+        "",
+        "The `size_clear_contrast_pilot/` directory repeats the 2x2 size/crowding design with larger target-distractor size margins.",
+        "",
+        "| Scene variant | Target radii | Moving distractors |",
+        "| --- | --- | ---: |",
+    ])
+    for scene_name, config in CLEAR_SIZE_SCENE_CONFIGS.items():
+        lines.append(
+            f"| `{scene_name}` | {config['target_radii'][0]}, {config['target_radii'][1]} | "
+            f"{config['moving_distractors']} |"
+        )
+    lines.extend([
+        "",
         "Every distractor radius lies strictly between the target radii, so `the smallest circle` and `the largest circle` each identify exactly one target.",
     ])
     output_root.mkdir(parents=True, exist_ok=True)
@@ -198,6 +287,7 @@ def write_readme(args):
         "dataset_version": args.dataset_version,
         "samples_per_variant": args.samples_per_variant,
         "size_stress_samples_per_cell": args.size_stress_samples_per_cell,
+        "size_clear_contrast_samples_per_cell": args.size_clear_contrast_samples_per_cell,
         "seed": args.seed,
         "fps": args.fps,
         "level_durations": args.level_durations,
@@ -210,6 +300,7 @@ def write_readme(args):
         "feature_variants": list(FEATURE_VARIANTS),
         "generated_variants": args.variants,
         "size_scene_variants": SIZE_SCENE_CONFIGS,
+        "size_clear_contrast_variants": CLEAR_SIZE_SCENE_CONFIGS,
     }
     (output_root / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
 
@@ -219,9 +310,12 @@ def main():
     parser.add_argument("--dataset_version", default="l5_feature_ablation_v1")
     parser.add_argument("--samples_per_variant", type=int, default=30)
     parser.add_argument("--size_stress_samples_per_cell", type=int, default=10)
+    parser.add_argument("--size_clear_contrast_samples_per_cell", type=int, default=10)
     parser.add_argument("--variants", type=parse_variants, default=list(FEATURE_VARIANTS))
     parser.add_argument("--skip_size_stress_pilot", action="store_true")
+    parser.add_argument("--skip_size_clear_contrast_pilot", action="store_true")
     parser.add_argument("--size_stress_only", action="store_true")
+    parser.add_argument("--size_clear_contrast_only", action="store_true")
     parser.add_argument("--output_root", default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fps", type=int, default=15)
@@ -243,6 +337,7 @@ def main():
     base_level = next(level for level in LEVELS if level["difficulty_level"] == 5)
     generate_feature_variants(args, base_level)
     generate_size_stress_pilot(args, base_level)
+    generate_size_clear_contrast_pilot(args, base_level)
     write_readme(args)
 
 

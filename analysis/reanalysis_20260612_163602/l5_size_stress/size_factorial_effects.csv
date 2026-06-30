@@ -1,0 +1,7 @@
+measure,effect,estimate,interpretation
+prompt_accuracy,large_minus_small,0.03124999999999989,positive means larger targets are easier
+prompt_accuracy,few_minus_many,0.23124999999999996,positive means fewer distractors are easier
+prompt_accuracy,small_x_many_interaction,0.012500000000000067,negative means the small+many combination has an extra cost
+strict_both_correct,large_minus_small,0.03750000000000009,positive means larger targets are easier
+strict_both_correct,few_minus_many,0.1875,positive means fewer distractors are easier
+strict_both_correct,small_x_many_interaction,0.025000000000000133,negative means the small+many combination has an extra cost

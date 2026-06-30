@@ -1,0 +1,2 @@
+video_pairs,prompt_accuracy,strict_both_correct,accuracy_strict_gap_d,position_sensitive_rate,both_wrong_rate,both_correct_count,exactly_one_correct_count,both_wrong_count
+160,0.740625,0.65625,0.08437499999999998,0.16875,0.175,105,27,28

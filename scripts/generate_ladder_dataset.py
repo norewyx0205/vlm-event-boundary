@@ -865,6 +865,7 @@ def generate_level(level, args, durations, target_identity_specs):
                     "size_only": "size",
                 }[feature_variant],
                 "size_scene_variant": getattr(args, "size_scene_variant", ""),
+                "size_contrast_condition": getattr(args, "size_contrast_condition", ""),
                 "target_size_condition": getattr(args, "target_size_condition", ""),
                 "distractor_count_condition": getattr(args, "distractor_count_condition", ""),
                 "condition": condition,

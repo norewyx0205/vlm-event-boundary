@@ -1,0 +1,5 @@
+difficulty_level,condition,total,correct,accuracy
+5,audio_boundary,80,60,0.75
+5,low_boundary,80,56,0.7
+5,temporal_boundary,80,62,0.775
+5,visual_boundary,80,59,0.7375

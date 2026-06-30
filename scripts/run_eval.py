@@ -40,8 +40,14 @@ KEY_FIELDS = [
     "feature_variant",
     "feature_encoding",
     "size_scene_variant",
+    "size_contrast_condition",
     "target_size_condition",
     "distractor_count_condition",
+    "diagnostic_type",
+    "diagnostic_family",
+    "diagnostic_source_eval_id",
+    "perturbation_type",
+    "perturbation_target",
     "condition",
     "boundary_type",
     "base_sample_id",
@@ -62,6 +68,7 @@ KEY_FIELDS = [
     "correct_option",
     "option_A",
     "option_B",
+    "question",
 ]
 
 
@@ -215,11 +222,19 @@ def process_video_inputs(messages):
     return image_inputs, video_inputs, video_kwargs
 
 
-def build_messages(video_path, option_a, option_b, video_fps=None, video_max_pixels=None):
+def build_messages(
+    video_path,
+    option_a,
+    option_b,
+    video_fps=None,
+    video_max_pixels=None,
+    question=None,
+):
+    prompt_question = question or "Which statement correctly describes the order of events?"
     prompt = f"""
 Watch the video carefully.
 
-Which statement correctly describes the order of events?
+{prompt_question}
 
 A: {option_a}
 B: {option_b}
@@ -256,8 +271,9 @@ def ask_model(
     max_new_tokens=10,
     empty_cache_each_sample=False,
     prepared_vision=None,
+    question=None,
 ):
-    messages = build_messages(video_path, option_a, option_b, video_fps, video_max_pixels)
+    messages = build_messages(video_path, option_a, option_b, video_fps, video_max_pixels, question)
 
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     if prepared_vision is None:
@@ -339,6 +355,7 @@ def evaluate_annotation(model, processor, args, annotation_path, dataset_name, t
                 item["option_B"],
                 args.video_fps,
                 args.video_max_pixels,
+                item.get("question"),
             )
             cached_vision = process_video_inputs(messages)
             cached_video_path = item["video_path"]
@@ -353,6 +370,7 @@ def evaluate_annotation(model, processor, args, annotation_path, dataset_name, t
             args.max_new_tokens,
             args.empty_cache_each_sample,
             cached_vision,
+            item.get("question"),
         )
         correct = pred == item["correct_option"]
 

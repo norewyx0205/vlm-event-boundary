@@ -1,0 +1,9 @@
+size_scene_variant,correct_option,total,correct,accuracy
+large_few,A,40,37,0.925
+large_few,B,40,33,0.825
+large_many,A,40,24,0.6
+large_many,B,40,27,0.675
+small_few,A,40,33,0.825
+small_few,B,40,34,0.85
+small_many,A,40,22,0.55
+small_many,B,40,27,0.675

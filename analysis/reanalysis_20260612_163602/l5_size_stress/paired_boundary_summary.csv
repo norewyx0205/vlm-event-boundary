@@ -1,0 +1,13 @@
+difficulty_level,difficulty_name,feature_variant,size_scene_variant,comparison,pairs,mean_difference,improved,same,worse
+5,L5_size_only_large_few,size_only,large_few,audio_boundary_minus_low_boundary,10,0.05,1,9,0
+5,L5_size_only_large_few,size_only,large_few,temporal_boundary_minus_low_boundary,10,0.15,3,7,0
+5,L5_size_only_large_few,size_only,large_few,visual_boundary_minus_low_boundary,10,0.1,3,5,2
+5,L5_size_only_large_many,size_only,large_many,audio_boundary_minus_low_boundary,10,0.05,1,9,0
+5,L5_size_only_large_many,size_only,large_many,temporal_boundary_minus_low_boundary,10,0.05,1,9,0
+5,L5_size_only_large_many,size_only,large_many,visual_boundary_minus_low_boundary,10,0.05,1,9,0
+5,L5_size_only_small_few,size_only,small_few,audio_boundary_minus_low_boundary,10,0.0,1,8,1
+5,L5_size_only_small_few,size_only,small_few,temporal_boundary_minus_low_boundary,10,0.0,1,8,1
+5,L5_size_only_small_few,size_only,small_few,visual_boundary_minus_low_boundary,10,-0.05,1,7,2
+5,L5_size_only_small_many,size_only,small_many,audio_boundary_minus_low_boundary,10,0.1,2,8,0
+5,L5_size_only_small_many,size_only,small_many,temporal_boundary_minus_low_boundary,10,0.1,2,8,0
+5,L5_size_only_small_many,size_only,small_many,visual_boundary_minus_low_boundary,10,0.05,1,9,0

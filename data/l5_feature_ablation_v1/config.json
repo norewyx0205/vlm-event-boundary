@@ -2,6 +2,7 @@
   "dataset_version": "l5_feature_ablation_v1",
   "samples_per_variant": 30,
   "size_stress_samples_per_cell": 10,
+  "size_clear_contrast_samples_per_cell": 10,
   "seed": 42,
   "fps": 15,
   "level_durations": [
@@ -25,6 +26,9 @@
     "size_only"
   ],
   "generated_variants": [
+    "full",
+    "shape_only",
+    "color_only",
     "size_only"
   ],
   "size_scene_variants": {
@@ -79,6 +83,66 @@
         21,
         24,
         26
+      ],
+      "moving_distractors": 4
+    }
+  },
+  "size_clear_contrast_variants": {
+    "clear_large_few": {
+      "target_size_condition": "large",
+      "distractor_count_condition": "few",
+      "size_contrast_condition": "clear",
+      "target_radii": [
+        28,
+        72
+      ],
+      "distractor_radii": [
+        46
+      ],
+      "moving_distractors": 1
+    },
+    "clear_large_many": {
+      "target_size_condition": "large",
+      "distractor_count_condition": "many",
+      "size_contrast_condition": "clear",
+      "target_radii": [
+        28,
+        72
+      ],
+      "distractor_radii": [
+        40,
+        46,
+        52,
+        58
+      ],
+      "moving_distractors": 4
+    },
+    "clear_small_few": {
+      "target_size_condition": "small",
+      "distractor_count_condition": "few",
+      "size_contrast_condition": "clear",
+      "target_radii": [
+        14,
+        48
+      ],
+      "distractor_radii": [
+        30
+      ],
+      "moving_distractors": 1
+    },
+    "clear_small_many": {
+      "target_size_condition": "small",
+      "distractor_count_condition": "many",
+      "size_contrast_condition": "clear",
+      "target_radii": [
+        14,
+        48
+      ],
+      "distractor_radii": [
+        24,
+        30,
+        36,
+        40
       ],
       "moving_distractors": 4
     }

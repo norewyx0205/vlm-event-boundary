@@ -1,0 +1,5 @@
+category,count
+both_correct,105
+both_wrong,28
+original_correct_swapped_wrong,11
+original_wrong_swapped_correct,16

@@ -1,0 +1,5 @@
+size_scene_variant,target_size_condition,distractor_count_condition,total,correct,accuracy
+large_few,large,few,80,70,0.875
+large_many,large,many,80,51,0.6375
+small_few,small,few,80,67,0.8375
+small_many,small,many,80,49,0.6125

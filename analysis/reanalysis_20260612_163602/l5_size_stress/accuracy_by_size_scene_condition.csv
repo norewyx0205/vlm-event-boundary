@@ -1,0 +1,17 @@
+size_scene_variant,target_size_condition,distractor_count_condition,condition,total,correct,accuracy
+large_few,large,few,audio_boundary,20,17,0.85
+large_few,large,few,low_boundary,20,16,0.8
+large_few,large,few,temporal_boundary,20,19,0.95
+large_few,large,few,visual_boundary,20,18,0.9
+large_many,large,many,audio_boundary,20,13,0.65
+large_many,large,many,low_boundary,20,12,0.6
+large_many,large,many,temporal_boundary,20,13,0.65
+large_many,large,many,visual_boundary,20,13,0.65
+small_few,small,few,audio_boundary,20,17,0.85
+small_few,small,few,low_boundary,20,17,0.85
+small_few,small,few,temporal_boundary,20,17,0.85
+small_few,small,few,visual_boundary,20,16,0.8
+small_many,small,many,audio_boundary,20,13,0.65
+small_many,small,many,low_boundary,20,11,0.55
+small_many,small,many,temporal_boundary,20,13,0.65
+small_many,small,many,visual_boundary,20,12,0.6

@@ -16,6 +16,12 @@ VARIANT_DIRS = {
     "size_only": "L5_size_only",
 }
 SIZE_SCENE_VARIANTS = ("large_few", "large_many", "small_few", "small_many")
+CLEAR_SIZE_SCENE_VARIANTS = (
+    "clear_large_few",
+    "clear_large_many",
+    "clear_small_few",
+    "clear_small_many",
+)
 
 
 def structural_signature(row):
@@ -233,6 +239,22 @@ def main():
             for row in rows:
                 if row.get("size_scene_variant") != scene_name:
                     failures.append(f"{row.get('eval_id')}: wrong size_scene_variant")
+
+    clear_root = root / "size_clear_contrast_pilot"
+    if clear_root.exists():
+        for scene_name in CLEAR_SIZE_SCENE_VARIANTS:
+            rows = validate_dataset_dir(
+                clear_root / f"L5_size_only_{scene_name}",
+                "size_only",
+                10,
+                failures,
+            )
+            failures.extend(balance_errors(rows, scene_name))
+            for row in rows:
+                if row.get("size_scene_variant") != scene_name:
+                    failures.append(f"{row.get('eval_id')}: wrong size_scene_variant")
+                if row.get("size_contrast_condition") != "clear":
+                    failures.append(f"{row.get('eval_id')}: wrong size_contrast_condition")
 
     print(f"feature_constraints_ok={not failures}")
     print(f"structural_pairing_ok={not failures}")

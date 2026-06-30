@@ -168,6 +168,29 @@ The separate `size_stress_pilot/` uses a 2x2 design:
 With 10 base samples per cell, four boundaries, and mirrored prompts, this pilot
 contains `4 x 10 x 4 x 2 = 320` prompt evaluations.
 
+The separate `size_clear_contrast_pilot/` repeats the same 2x2 design with
+larger target-distractor size margins. This is intended to test whether the
+previous size-only pattern survives when the smallest/largest contrast is
+visually clear enough for the model's coarse visual-token resolution.
+
+| Scene | Absolute target size | Distractor count |
+| --- | --- | ---: |
+| `clear_large_few` | radii 28 / 72 | 1 |
+| `clear_large_many` | radii 28 / 72 | 4 |
+| `clear_small_few` | radii 14 / 48 | 1 |
+| `clear_small_many` | radii 14 / 48 | 4 |
+
+Generate only the clear-contrast pilot:
+
+```bash
+python scripts/generate_l5_feature_ablation.py \
+  --dataset_version l5_feature_ablation_v1 \
+  --size_clear_contrast_only \
+  --size_clear_contrast_samples_per_cell 10 \
+  --output_root data/l5_feature_ablation_v1 \
+  --seed 42
+```
+
 Validate the pilot:
 
 ```bash
@@ -219,6 +242,27 @@ python scripts/analyze_results.py \
   --plots
 ```
 
+Evaluate the clear-contrast pilot:
+
+```bash
+python scripts/run_eval.py \
+  --annotation_root data/l5_feature_ablation_v1/size_clear_contrast_pilot \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name_prefix l5_feature_ablation_v1_size_clear_contrast_ \
+  --output_dir results
+```
+
+Analyze the clear-contrast pilot:
+
+```bash
+python scripts/analyze_results.py \
+  --input results \
+  --dataset_name_prefix l5_feature_ablation_v1_size_clear_contrast_ \
+  --latest_per_dataset \
+  --output_dir analysis/l5_feature_ablation_v1_size_clear_contrast \
+  --plots
+```
+
 The size analysis reports prompt accuracy, strict both-correct pair accuracy,
 boundary-condition effects, response-position sensitivity, and factorial
 estimates for target size, distractor count, and their interaction.
@@ -226,6 +270,57 @@ Its matched boundary plots are `accuracy_by_size_scene_condition.png` and
 `strict_pair_by_size_scene_condition.png`. The main feature-ablation plots use
 the same `Full / Shape only / Color only / Size only` ordering for prompt
 accuracy and strict pair accuracy.
+
+## Diagnostic And Mechanism Probes
+
+You can create diagnostic forced-choice prompts from an existing annotation file
+without regenerating videos. These prompts separate object identity, motion
+binding, and event-order tracking more cleanly than the final before/after task.
+
+```bash
+python scripts/make_diagnostic_annotations.py \
+  --annotation_root data/l5_feature_ablation_v1/size_clear_contrast_pilot \
+  --output_path data/diagnostics/l5_size_clear_contrast_diagnostics/annotations.jsonl
+
+python scripts/run_eval.py \
+  --annotation_path data/diagnostics/l5_size_clear_contrast_diagnostics/annotations.jsonl \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name l5_size_clear_contrast_diagnostics \
+  --output_dir results
+
+python scripts/analyze_results.py \
+  --input results \
+  --dataset_name_prefix l5_size_clear_contrast_diagnostics \
+  --latest_per_dataset \
+  --output_dir analysis/l5_size_clear_contrast_diagnostics \
+  --plots
+```
+
+`analyze_results.py` automatically writes diagnostic tables and plots when
+`diagnostic_type` is present in raw results, including
+`accuracy_by_diagnostic_type_condition.csv` and
+`strict_pair_by_diagnostic_type_condition.png`.
+
+For causal perturbation, create masked-video variants and evaluate them with the
+same runner:
+
+```bash
+python scripts/make_roi_perturbation_dataset.py \
+  --annotation_path data/l5_feature_ablation_v1/size_clear_contrast_pilot/L5_size_only_clear_small_many/annotations.jsonl \
+  --output_root data/perturbations/l5_clear_small_many
+```
+
+For small-sample attention inspection, use the ROI probe. This is intentionally
+separate from `run_eval.py` because `output_attentions=True` is memory-heavy.
+
+```bash
+python scripts/probe_attention_roi.py \
+  --annotation_path data/l5_feature_ablation_v1/size_clear_contrast_pilot/L5_size_only_clear_small_many/annotations.jsonl \
+  --output_path analysis/attention/l5_clear_small_many_attention.json \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --model_revision 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
+  --max_samples 8
+```
 
 This produces feature-level accuracy, strict mirrored-pair accuracy, the accuracy-strict gap `d`, position-sensitive pair rates, paired boundary/feature differences, and swap-consistency diagnostics. Report plots include:
 

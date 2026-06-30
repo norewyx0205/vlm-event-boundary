@@ -25,4 +25,15 @@ The `size_stress_pilot/` directory independently manipulates absolute target siz
 | `small_few` | 14, 28 | 1 |
 | `small_many` | 14, 28 | 4 |
 
+## Size-only clear-contrast pilot
+
+The `size_clear_contrast_pilot/` directory repeats the 2x2 size/crowding design with larger target-distractor size margins.
+
+| Scene variant | Target radii | Moving distractors |
+| --- | --- | ---: |
+| `clear_large_few` | 28, 72 | 1 |
+| `clear_large_many` | 28, 72 | 4 |
+| `clear_small_few` | 14, 48 | 1 |
+| `clear_small_many` | 14, 48 | 4 |
+
 Every distractor radius lies strictly between the target radii, so `the smallest circle` and `the largest circle` each identify exactly one target.

@@ -18,12 +18,25 @@ FEATURE_LABELS = {
     "color_only": "Color only",
     "size_only": "Size only",
 }
-SIZE_SCENE_VARIANTS = ("large_few", "large_many", "small_few", "small_many")
+SIZE_SCENE_VARIANTS = (
+    "large_few",
+    "large_many",
+    "small_few",
+    "small_many",
+    "clear_large_few",
+    "clear_large_many",
+    "clear_small_few",
+    "clear_small_many",
+)
 SIZE_SCENE_LABELS = {
     "large_few": "Large / few",
     "large_many": "Large / many",
     "small_few": "Small / few",
     "small_many": "Small / many",
+    "clear_large_few": "Clear large / few",
+    "clear_large_many": "Clear large / many",
+    "clear_small_few": "Clear small / few",
+    "clear_small_many": "Clear small / many",
 }
 
 
@@ -1083,6 +1096,29 @@ def main():
         ["size_scene_variant", "condition"],
     )
     size_factorial_summary = size_factorial_effects(size_scene_rows, strict_by_size_scene)
+    diagnostic_rows = [row for row in rows if row.get("diagnostic_type")]
+    diagnostic_swap_details = [row for row in swap_details if row.get("diagnostic_type")]
+    by_diagnostic_type = (
+        grouped_accuracy(diagnostic_rows, ["diagnostic_type"]) if diagnostic_rows else []
+    )
+    by_diagnostic_type_condition = (
+        grouped_accuracy(diagnostic_rows, ["diagnostic_type", "condition"])
+        if diagnostic_rows else []
+    )
+    by_diagnostic_type_correct_option = (
+        grouped_accuracy(diagnostic_rows, ["diagnostic_type", "correct_option"])
+        if diagnostic_rows else []
+    )
+    strict_by_diagnostic_type = strict_pair_metrics(
+        diagnostic_rows,
+        diagnostic_swap_details,
+        ["diagnostic_type"],
+    )
+    strict_by_diagnostic_type_condition = strict_pair_metrics(
+        diagnostic_rows,
+        diagnostic_swap_details,
+        ["diagnostic_type", "condition"],
+    )
 
     write_csv(output_dir / "accuracy_by_difficulty.csv", by_difficulty)
     write_csv(output_dir / "accuracy_by_difficulty_condition.csv", by_difficulty_condition)
@@ -1116,6 +1152,11 @@ def main():
     write_csv(output_dir / "strict_pair_by_size_scene.csv", strict_by_size_scene)
     write_csv(output_dir / "strict_pair_by_size_scene_condition.csv", strict_by_size_scene_condition)
     write_csv(output_dir / "size_factorial_effects.csv", size_factorial_summary)
+    write_csv(output_dir / "accuracy_by_diagnostic_type.csv", by_diagnostic_type)
+    write_csv(output_dir / "accuracy_by_diagnostic_type_condition.csv", by_diagnostic_type_condition)
+    write_csv(output_dir / "accuracy_by_diagnostic_type_correct_option.csv", by_diagnostic_type_correct_option)
+    write_csv(output_dir / "strict_pair_by_diagnostic_type.csv", strict_by_diagnostic_type)
+    write_csv(output_dir / "strict_pair_by_diagnostic_type_condition.csv", strict_by_diagnostic_type_condition)
 
     summary = {
         "input": args.input,
@@ -1146,6 +1187,11 @@ def main():
         "strict_pair_by_size_scene": strict_by_size_scene,
         "strict_pair_by_size_scene_condition": strict_by_size_scene_condition,
         "size_factorial_effects": size_factorial_summary,
+        "accuracy_by_diagnostic_type": by_diagnostic_type,
+        "accuracy_by_diagnostic_type_condition": by_diagnostic_type_condition,
+        "accuracy_by_diagnostic_type_correct_option": by_diagnostic_type_correct_option,
+        "strict_pair_by_diagnostic_type": strict_by_diagnostic_type,
+        "strict_pair_by_diagnostic_type_condition": strict_by_diagnostic_type_condition,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1357,6 +1403,52 @@ def main():
                 "strict_both_correct",
                 "Target-size and distractor-count interaction: strict pair accuracy",
                 output_dir / "size_crowding_interaction_strict_pair.png",
+            )
+        if by_diagnostic_type_condition:
+            diagnostic_variants = sorted({row["diagnostic_type"] for row in by_diagnostic_type_condition})
+            diagnostic_labels = {
+                name: name.replace("_", " ").title()
+                for name in diagnostic_variants
+            }
+            diagnostic_plot_rows = [
+                {
+                    "feature_variant": row["diagnostic_type"],
+                    "condition": row["condition"],
+                    "accuracy": row["accuracy"],
+                }
+                for row in by_diagnostic_type_condition
+            ]
+            make_feature_plot(
+                diagnostic_plot_rows,
+                output_dir / "accuracy_by_diagnostic_type_condition.png",
+                title="Diagnostic prompt accuracy by boundary",
+                variants=diagnostic_variants,
+                labels=diagnostic_labels,
+                x_axis_label="Diagnostic type",
+                y_label="Prompt accuracy",
+            )
+        if strict_by_diagnostic_type_condition:
+            diagnostic_variants = sorted({row["diagnostic_type"] for row in strict_by_diagnostic_type_condition})
+            diagnostic_labels = {
+                name: name.replace("_", " ").title()
+                for name in diagnostic_variants
+            }
+            diagnostic_plot_rows = [
+                {
+                    "feature_variant": row["diagnostic_type"],
+                    "condition": row["condition"],
+                    "accuracy": row["strict_both_correct"],
+                }
+                for row in strict_by_diagnostic_type_condition
+            ]
+            make_feature_plot(
+                diagnostic_plot_rows,
+                output_dir / "strict_pair_by_diagnostic_type_condition.png",
+                title="Diagnostic strict both-correct by boundary",
+                variants=diagnostic_variants,
+                labels=diagnostic_labels,
+                x_axis_label="Diagnostic type",
+                y_label="Strict pair",
             )
 
     print(f"Analyzed {len(rows)} rows from {len(result_files)} raw result file(s).")
