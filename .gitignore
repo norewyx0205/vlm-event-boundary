@@ -19,3 +19,7 @@ baseline_boundary_videos/videos/
 # Large eval artifacts
 #*.mp4
 *.wav
+
+# Local thesis draft/template
+thesis_part1/
+thesis_part1.zip

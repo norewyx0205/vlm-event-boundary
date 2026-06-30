@@ -40,6 +40,40 @@ SIZE_SCENE_LABELS = {
 }
 
 
+def ordered_size_scene_variants(rows, key="size_scene_variant"):
+    present = {row.get(key) for row in rows}
+    ordered = [variant for variant in SIZE_SCENE_VARIANTS if variant in present]
+    extras = sorted(variant for variant in present if variant and variant not in ordered)
+    return ordered + extras
+
+
+def axis_label_lines(label):
+    label = str(label)
+    if " / " in label:
+        return label.split(" / ", 1)
+    if len(label) <= 14 or " " not in label:
+        return [label]
+    words = label.split()
+    midpoint = len(words) // 2
+    return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
+
+
+def put_centered_lines(image, lines, center_x, y, font, scale, color, thickness, line_gap=22):
+    import cv2
+
+    for line_idx, line in enumerate(lines):
+        size, _ = cv2.getTextSize(line, font, scale, thickness)
+        cv2.putText(
+            image,
+            line,
+            (round(center_x - size[0] / 2), y + line_idx * line_gap),
+            font,
+            scale,
+            color,
+            thickness,
+        )
+
+
 def load_result_files(path):
     path = Path(path)
     if path.is_file():
@@ -622,9 +656,9 @@ def make_feature_plot(
     for row in rows:
         grouped[row["condition"]][row["feature_variant"]] = float(row["accuracy"])
 
-    width, height = 1120, 620
+    width, height = max(1120, 145 * len(variants) + 390), 660
     margin_left, margin_right = 95, 290
-    margin_top, margin_bottom = 85, 95
+    margin_top, margin_bottom = 85, 135
     plot_w = width - margin_left - margin_right
     plot_h = height - margin_top - margin_bottom
     image = np.ones((height, width, 3), dtype=np.uint8) * 255
@@ -638,12 +672,13 @@ def make_feature_plot(
         x = margin_left + round(idx / max(1, len(variants) - 1) * plot_w)
         x_positions[variant] = x
         cv2.line(image, (x, margin_top + plot_h), (x, margin_top + plot_h + 6), axis_color, 1)
-        cv2.putText(
+        put_centered_lines(
             image,
-            labels[variant],
-            (x - max(36, len(labels[variant]) * 5), margin_top + plot_h + 32),
+            axis_label_lines(labels[variant]),
+            x,
+            margin_top + plot_h + 32,
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.52,
             axis_color,
             1,
         )
@@ -719,9 +754,9 @@ def make_grouped_bar_plot(categories, series, values, title, output_path, y_labe
         print("opencv-python and numpy are required for plots; skipping grouped bar plot.")
         return
 
-    width, height = 1120, 650
+    width, height = max(1120, 165 * len(categories) + 390), 690
     margin_left, margin_right = 95, 250
-    margin_top, margin_bottom = 90, 115
+    margin_top, margin_bottom = 90, 155
     plot_w = width - margin_left - margin_right
     plot_h = height - margin_top - margin_bottom
     image = np.ones((height, width, 3), dtype=np.uint8) * 255
@@ -758,13 +793,13 @@ def make_grouped_bar_plot(categories, series, values, title, output_path, y_labe
                 axis_color,
                 1,
             )
-        label_x = round(group_center - max(30, len(category) * 4))
-        cv2.putText(
+        put_centered_lines(
             image,
-            category,
-            (label_x, margin_top + plot_h + 34),
+            axis_label_lines(category),
+            group_center,
+            margin_top + plot_h + 34,
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            0.52,
             axis_color,
             1,
         )
@@ -808,9 +843,9 @@ def make_pair_outcome_plot(rows, output_path, variants=None, labels=None, title=
         ]
     }
 
-    width, height = 1050, 650
+    width, height = max(1050, 150 * len(variants) + 390), 690
     margin_left, margin_right = 100, 270
-    margin_top, margin_bottom = 90, 100
+    margin_top, margin_bottom = 90, 145
     plot_w = width - margin_left - margin_right
     plot_h = height - margin_top - margin_bottom
     image = np.ones((height, width, 3), dtype=np.uint8) * 255
@@ -845,12 +880,13 @@ def make_pair_outcome_plot(rows, output_path, variants=None, labels=None, title=
                     1,
                 )
             bottom_y = top_y
-        cv2.putText(
+        put_centered_lines(
             image,
-            labels[variant],
-            (round(center - max(36, len(labels[variant]) * 5)), margin_top + plot_h + 34),
+            axis_label_lines(labels[variant]),
+            center,
+            margin_top + plot_h + 34,
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            0.52,
             axis_color,
             1,
         )
@@ -1196,6 +1232,11 @@ def main():
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if args.plots:
+        present_size_scene_variants = ordered_size_scene_variants(size_scene_rows)
+        present_size_scene_labels = {
+            variant: SIZE_SCENE_LABELS.get(variant, variant)
+            for variant in present_size_scene_variants
+        }
         make_plot(by_difficulty_condition, output_dir / "accuracy_by_difficulty_condition.png")
         if strict_by_difficulty_condition:
             make_plot(
@@ -1342,8 +1383,8 @@ def main():
                 size_boundary_rows,
                 output_dir / "accuracy_by_size_scene_condition.png",
                 title="Size-only 2x2 pilot by boundary condition",
-                variants=SIZE_SCENE_VARIANTS,
-                labels=SIZE_SCENE_LABELS,
+                variants=present_size_scene_variants,
+                labels=present_size_scene_labels,
                 x_axis_label="Target size / distractor count",
                 y_label="Prompt accuracy",
             )
@@ -1361,8 +1402,8 @@ def main():
                 strict_size_boundary_rows,
                 output_dir / "strict_pair_by_size_scene_condition.png",
                 title="Size-only 2x2 strict both-correct by boundary",
-                variants=SIZE_SCENE_VARIANTS,
-                labels=SIZE_SCENE_LABELS,
+                variants=present_size_scene_variants,
+                labels=present_size_scene_labels,
                 x_axis_label="Target size / distractor count",
                 y_label="Strict pair",
             )
@@ -1374,7 +1415,7 @@ def main():
                 scene_accuracy_values[(label, "Prompt accuracy")] = row["prompt_accuracy"]
                 scene_accuracy_values[(label, "Strict both-correct")] = row["strict_both_correct"]
             make_grouped_bar_plot(
-                [SIZE_SCENE_LABELS[variant] for variant in SIZE_SCENE_VARIANTS],
+                [present_size_scene_labels[variant] for variant in present_size_scene_variants],
                 ["Prompt accuracy", "Strict both-correct"],
                 scene_accuracy_values,
                 "Size-only scene accuracy versus strict pair accuracy",
@@ -1388,8 +1429,8 @@ def main():
             make_pair_outcome_plot(
                 scene_pair_rows,
                 output_dir / "pair_outcomes_by_size_scene.png",
-                variants=SIZE_SCENE_VARIANTS,
-                labels=SIZE_SCENE_LABELS,
+                variants=present_size_scene_variants,
+                labels=present_size_scene_labels,
                 title="Mirrored-pair outcomes in the size-only 2x2 pilot",
             )
             make_size_interaction_plot(
