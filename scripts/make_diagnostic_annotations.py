@@ -36,7 +36,14 @@ def source_rows(annotation_paths):
             yield path, row
 
 
-def mirror_rows(base_row, diagnostic_type, question, correct_sentence, incorrect_sentence):
+def mirror_rows(
+    base_row,
+    diagnostic_type,
+    question,
+    correct_sentence,
+    incorrect_sentence,
+    extra_fields=None,
+):
     common = {
         **base_row,
         "diagnostic_type": diagnostic_type,
@@ -45,6 +52,7 @@ def mirror_rows(base_row, diagnostic_type, question, correct_sentence, incorrect
         "question": question,
         "correct_sentence": correct_sentence,
         "incorrect_sentence": incorrect_sentence,
+        **(extra_fields or {}),
     }
     eval_prefix = f"{base_row.get('pairing_id') or base_row.get('eval_id')}_{diagnostic_type}"
     return [
@@ -105,18 +113,64 @@ def make_motion_binding_rows(row):
     )
 
 
+def relative_position(subject, reference):
+    subject_from = subject.get("from") or []
+    reference_from = reference.get("from") or []
+    if len(subject_from) < 2 or len(reference_from) < 2:
+        return None, None, None
+
+    dx = subject_from[0] - reference_from[0]
+    dy = subject_from[1] - reference_from[1]
+    if abs(dx) >= abs(dy):
+        relation = "left" if dx < 0 else "right"
+        opposite = "right" if relation == "left" else "left"
+        return "horizontal", relation, opposite
+
+    relation = "above" if dy < 0 else "below"
+    opposite = "below" if relation == "above" else "above"
+    return "vertical", relation, opposite
+
+
+def starts_relation_sentence(subject, relation, reference):
+    subject_label = object_label(subject).capitalize()
+    reference_label = object_label(reference)
+    if relation in {"left", "right"}:
+        return f"{subject_label} starts to the {relation} of {reference_label}."
+    return f"{subject_label} starts {relation} {reference_label}."
+
+
 def make_size_extreme_rows(row):
     if row.get("feature_variant") != "size_only":
         return []
-    distractors = row.get("distractors") or []
-    if not distractors:
+
+    targets = row.get("target_objects") or []
+    smallest = next((obj for obj in targets if obj.get("reference_label") == "smallest"), None)
+    largest = next((obj for obj in targets if obj.get("reference_label") == "largest"), None)
+    if not smallest or not largest:
         return []
+
+    if int(row.get("base_sample_id", 0)) % 2 == 0:
+        subject, reference = smallest, largest
+    else:
+        subject, reference = largest, smallest
+
+    axis, relation, opposite = relative_position(subject, reference)
+    if not relation:
+        return []
+
     return mirror_rows(
         row,
         "size_extreme_identity",
-        "Which statement correctly describes the relative size of a target object?",
-        "The smallest circle is smaller than every distractor.",
-        "The largest circle is smaller than every distractor.",
+        "Which statement correctly describes the starting positions of the smallest and largest target circles?",
+        starts_relation_sentence(subject, relation, reference),
+        starts_relation_sentence(subject, opposite, reference),
+        {
+            "diagnostic_prompt_version": "spatial_relation_v2",
+            "diagnostic_axis": axis,
+            "diagnostic_relation": relation,
+            "diagnostic_subject_reference_label": subject.get("reference_label", ""),
+            "diagnostic_reference_reference_label": reference.get("reference_label", ""),
+        },
     )
 
 

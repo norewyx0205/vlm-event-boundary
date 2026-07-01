@@ -276,6 +276,11 @@ accuracy and strict pair accuracy.
 You can create diagnostic forced-choice prompts from an existing annotation file
 without regenerating videos. These prompts separate object identity, motion
 binding, and event-order tracking more cleanly than the final before/after task.
+The `size_extreme_identity` diagnostic uses a video-grounded spatial relation
+prompt, for example whether the largest circle starts left/right or above/below
+the smallest circle. This avoids the earlier semantic shortcut where statements
+such as "the smallest circle is smaller than every distractor" could be answered
+from wording alone.
 
 ```bash
 python scripts/make_diagnostic_annotations.py \
