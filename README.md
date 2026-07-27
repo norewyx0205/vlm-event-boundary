@@ -437,6 +437,55 @@ more, use `--attn_implementation sdpa`; keep that choice fixed across compared r
 If strict deterministic mode reports an unsupported operation, add
 `--deterministic_warn_only` and record that relaxation.
 
+### Model-visible video inputs
+
+Source-video properties such as 512 x 512 resolution and 15 fps do not by
+themselves determine what the model receives. Qwen3-VL video preprocessing can
+sample by `fps` or by `num_frames`; these are mutually exclusive controls. The
+evaluator therefore exposes both options, but rejects commands that set both:
+
+```bash
+python scripts/run_eval.py \
+  --annotation_path data/ladder_v2/level_5_target_like_moving_distractors/annotations.jsonl \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name ladder_v2_level_5_target_like_moving_distractors \
+  --output_dir results \
+  --video_num_frames 32
+```
+
+If neither `--video_fps` nor `--video_num_frames` is supplied, the run uses the
+processor/qwen-vl-utils default sampling behavior. Do not report this as "all
+15 fps source frames were passed to the model" unless the archived input
+metadata verifies it.
+
+Each raw result row now includes `input_metadata` with:
+
+- `video_kwargs`, excluding verbose `video_metadata`
+- stringified `video_metadata`
+- decoded `video_inputs` shapes and frame counts from their first dimension
+- `pixel_values_videos` shape after processor preprocessing
+- `video_grid_thw`
+- visual-token counts derived from `video_grid_thw`
+- video-token count from `mm_token_type_ids`, when available
+- `input_ids`, `attention_mask`, and `mm_token_type_ids` shapes
+
+`config.json` also records the requested temporal sampler, pixel budget,
+model-load settings, decoding settings, and output parser. After evaluating a
+run with the new logger, produce a table-ready summary with:
+
+```bash
+python scripts/analyze_results.py \
+  --input results/Qwen_Qwen3-VL-8B-Instruct/ladder_v2_level_5_target_like_moving_distractors/<timestamp>/raw_results.jsonl \
+  --output_dir analysis/ladder_v2_level5_inputs \
+  --plots
+```
+
+The analyzer writes `model_input_by_boundary.csv`, grouped by boundary
+condition. Use this file for the thesis table reporting source duration,
+sampled-frame count, `video_grid_thw`, and visual-token counts. Older raw
+results created before this metadata was added cannot support that table
+without rerunning evaluation or separately probing the processor.
+
 Quick smoke test:
 
 ```bash

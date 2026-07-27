@@ -164,6 +164,9 @@ def swap_consistency(rows):
                 row.get("difficulty_level", ""),
                 row.get("condition", ""),
                 row.get("video_id", ""),
+                row.get("diagnostic_type", ""),
+                row.get("perturbation_type", ""),
+                row.get("perturbation_target", ""),
             )
             by_video[key][variant] = row
 
@@ -185,7 +188,16 @@ def swap_consistency(rows):
             category = "original_wrong_swapped_correct"
 
         counts[category] += 1
-        source_file, dataset_version, difficulty_level, condition, video_id = key
+        (
+            source_file,
+            dataset_version,
+            difficulty_level,
+            condition,
+            video_id,
+            diagnostic_type,
+            perturbation_type,
+            perturbation_target,
+        ) = key
         detail_rows.append({
             "source_file": source_file,
             "dataset_version": dataset_version,
@@ -195,6 +207,11 @@ def swap_consistency(rows):
             "size_scene_variant": pair["original"].get("size_scene_variant", ""),
             "target_size_condition": pair["original"].get("target_size_condition", ""),
             "distractor_count_condition": pair["original"].get("distractor_count_condition", ""),
+            "diagnostic_type": diagnostic_type,
+            "diagnostic_family": pair["original"].get("diagnostic_family", ""),
+            "diagnostic_prompt_version": pair["original"].get("diagnostic_prompt_version", ""),
+            "perturbation_type": perturbation_type,
+            "perturbation_target": perturbation_target,
             "condition": condition,
             "video_id": video_id,
             "category": category,
@@ -498,6 +515,97 @@ def size_factorial_effects(size_scene_rows, strict_by_scene):
                 "interpretation": "negative means the small+many combination has an extra cost",
             },
         ])
+    return output
+
+
+def number_or_none(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def summarize_numbers(values):
+    numbers = [number_or_none(value) for value in values]
+    numbers = [value for value in numbers if value is not None]
+    if not numbers:
+        return ""
+    min_value = min(numbers)
+    max_value = max(numbers)
+    mean_value = sum(numbers) / len(numbers)
+    if min_value == max_value:
+        return f"{min_value:g}"
+    return f"mean={mean_value:.3g}; range={min_value:g}-{max_value:g}"
+
+
+def compact_json(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def summarize_distinct(values, max_items=4):
+    distinct = sorted({compact_json(value) for value in values if value not in (None, "", [])})
+    if not distinct:
+        return ""
+    if len(distinct) == 1:
+        return distinct[0]
+    shown = "; ".join(distinct[:max_items])
+    suffix = "" if len(distinct) <= max_items else f"; ... ({len(distinct)} unique)"
+    return shown + suffix
+
+
+def first_video_input(meta, key):
+    videos = meta.get("video_inputs") or []
+    if not videos:
+        return None
+    return videos[0].get(key)
+
+
+def model_input_by_boundary(rows):
+    by_boundary = defaultdict(list)
+    seen = set()
+    for row in rows:
+        meta = row.get("input_metadata") or {}
+        if not meta:
+            continue
+        boundary = row.get("condition") or row.get("boundary_type") or "unknown"
+        key = (
+            row.get("_source_file", ""),
+            row.get("video_path", ""),
+            boundary,
+            compact_json(meta.get("video_grid_thw")),
+            compact_json(meta.get("video_inputs")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        by_boundary[boundary].append(row)
+
+    output = []
+    for boundary, items in sorted(by_boundary.items()):
+        metadata = [row.get("input_metadata") or {} for row in items]
+        output.append({
+            "boundary": boundary,
+            "unique_videos": len(items),
+            "source_duration_sec": summarize_numbers(row.get("duration_sec") for row in items),
+            "sampled_frames_from_video_inputs": summarize_numbers(
+                first_video_input(meta, "frame_count_from_first_dim") for meta in metadata
+            ),
+            "video_grid_thw": summarize_distinct(meta.get("video_grid_thw") for meta in metadata),
+            "visual_token_count_from_grid_thw": summarize_numbers(
+                meta.get("visual_token_count_from_grid_thw") for meta in metadata
+            ),
+            "video_token_count_from_mm_token_type_ids": summarize_numbers(
+                meta.get("video_token_count_from_mm_token_type_ids") for meta in metadata
+            ),
+            "video_inputs_shape": summarize_distinct(
+                first_video_input(meta, "shape") for meta in metadata
+            ),
+            "pixel_values_videos_shape": summarize_distinct(
+                (meta.get("pixel_values_videos") or {}).get("shape") for meta in metadata
+            ),
+        })
     return output
 
 
@@ -1155,6 +1263,7 @@ def main():
         diagnostic_swap_details,
         ["diagnostic_type", "condition"],
     )
+    model_input_boundary = model_input_by_boundary(rows)
 
     write_csv(output_dir / "accuracy_by_difficulty.csv", by_difficulty)
     write_csv(output_dir / "accuracy_by_difficulty_condition.csv", by_difficulty_condition)
@@ -1193,6 +1302,7 @@ def main():
     write_csv(output_dir / "accuracy_by_diagnostic_type_correct_option.csv", by_diagnostic_type_correct_option)
     write_csv(output_dir / "strict_pair_by_diagnostic_type.csv", strict_by_diagnostic_type)
     write_csv(output_dir / "strict_pair_by_diagnostic_type_condition.csv", strict_by_diagnostic_type_condition)
+    write_csv(output_dir / "model_input_by_boundary.csv", model_input_boundary)
 
     summary = {
         "input": args.input,
@@ -1228,6 +1338,7 @@ def main():
         "accuracy_by_diagnostic_type_correct_option": by_diagnostic_type_correct_option,
         "strict_pair_by_diagnostic_type": strict_by_diagnostic_type,
         "strict_pair_by_diagnostic_type_condition": strict_by_diagnostic_type_condition,
+        "model_input_by_boundary": model_input_boundary,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 

@@ -163,6 +163,7 @@ def probe_row(model, processor, row, args):
         row["option_A"],
         row["option_B"],
         args.video_fps,
+        args.video_num_frames,
         args.video_max_pixels,
         row.get("question"),
     )
@@ -215,8 +216,11 @@ def main():
     parser.add_argument("--max_samples", type=int, default=8)
     parser.add_argument("--max_new_tokens", type=int, default=4)
     parser.add_argument("--video_fps", type=float, default=None)
+    parser.add_argument("--video_num_frames", type=int, default=None)
     parser.add_argument("--video_max_pixels", type=int, default=None)
     args = parser.parse_args()
+    if args.video_fps is not None and args.video_num_frames is not None:
+        parser.error("Use only one temporal sampling control: --video_fps or --video_num_frames.")
 
     rows = read_jsonl(args.annotation_path)
     rows = rows[:args.max_samples]

@@ -77,6 +77,87 @@ KEY_FIELDS = [
 ]
 
 
+def json_safe(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().tolist()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    return str(value)
+
+
+def tensor_shape_metadata(tensor):
+    if tensor is None:
+        return None
+    return {
+        "shape": list(tensor.shape) if hasattr(tensor, "shape") else None,
+        "dtype": str(getattr(tensor, "dtype", "")),
+        "device": str(getattr(tensor, "device", "")),
+    }
+
+
+def video_input_metadata(video_inputs):
+    metadata = []
+    if not video_inputs:
+        return metadata
+    for item in video_inputs:
+        shape = list(item.shape) if hasattr(item, "shape") else None
+        entry = {
+            "shape": shape,
+            "dtype": str(getattr(item, "dtype", "")),
+            "frame_count_from_first_dim": shape[0] if shape and len(shape) >= 4 else None,
+        }
+        metadata.append(entry)
+    return metadata
+
+
+def count_video_tokens(inputs):
+    token_types = getattr(inputs, "mm_token_type_ids", None)
+    if token_types is None:
+        return None
+    return int((token_types.detach().cpu() == 2).sum().item())
+
+
+def processor_input_metadata(inputs, video_inputs, video_kwargs):
+    video_grid = None
+    video_grid_cells = None
+    if getattr(inputs, "video_grid_thw", None) is not None:
+        video_grid = inputs.video_grid_thw.detach().cpu().tolist()
+        video_grid_cells = [
+            int(grid[0] * grid[1] * grid[2])
+            for grid in video_grid
+            if len(grid) == 3
+        ]
+
+    safe_video_kwargs = {
+        key: json_safe(value)
+        for key, value in video_kwargs.items()
+        if key != "video_metadata"
+    }
+    video_metadata = video_kwargs.get("video_metadata")
+
+    return {
+        "video_kwargs": safe_video_kwargs,
+        "video_metadata": str(video_metadata) if video_metadata is not None else None,
+        "video_inputs": video_input_metadata(video_inputs),
+        "pixel_values_videos": tensor_shape_metadata(getattr(inputs, "pixel_values_videos", None)),
+        "video_grid_thw": video_grid,
+        "visual_tokens_from_grid_thw": video_grid_cells,
+        "visual_token_count_from_grid_thw": sum(video_grid_cells) if video_grid_cells else None,
+        "video_token_count_from_mm_token_type_ids": count_video_tokens(inputs),
+        "input_ids": tensor_shape_metadata(getattr(inputs, "input_ids", None)),
+        "attention_mask": tensor_shape_metadata(getattr(inputs, "attention_mask", None)),
+        "mm_token_type_ids": tensor_shape_metadata(getattr(inputs, "mm_token_type_ids", None)),
+    }
+
+
 def parse_answer(raw_text):
     text = raw_text.strip().upper()
     if text.startswith("A"):
@@ -232,6 +313,7 @@ def build_messages(
     option_a,
     option_b,
     video_fps=None,
+    video_num_frames=None,
     video_max_pixels=None,
     question=None,
 ):
@@ -253,6 +335,8 @@ Answer with only A or B.
     }
     if video_fps is not None:
         video_content["fps"] = video_fps
+    if video_num_frames is not None:
+        video_content["num_frames"] = video_num_frames
     if video_max_pixels is not None:
         video_content["max_pixels"] = video_max_pixels
 
@@ -272,13 +356,22 @@ def ask_model(
     option_a,
     option_b,
     video_fps=None,
+    video_num_frames=None,
     video_max_pixels=None,
     max_new_tokens=10,
     empty_cache_each_sample=False,
     prepared_vision=None,
     question=None,
 ):
-    messages = build_messages(video_path, option_a, option_b, video_fps, video_max_pixels, question)
+    messages = build_messages(
+        video_path,
+        option_a,
+        option_b,
+        video_fps,
+        video_num_frames,
+        video_max_pixels,
+        question,
+    )
 
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     if prepared_vision is None:
@@ -293,6 +386,7 @@ def ask_model(
         padding=True,
         return_tensors="pt",
     ).to(model.device)
+    input_metadata = processor_input_metadata(inputs, video_inputs, video_kwargs)
 
     with torch.inference_mode():
         generated_ids = model.generate(
@@ -313,7 +407,7 @@ def ask_model(
     del inputs, generated_ids, generated_ids_trimmed
     if empty_cache_each_sample and torch.cuda.is_available():
         torch.cuda.empty_cache()
-    return parse_answer(raw_text), raw_text
+    return parse_answer(raw_text), raw_text, input_metadata
 
 
 def update_stats(bucket, key, correct):
@@ -359,18 +453,20 @@ def evaluate_annotation(model, processor, args, annotation_path, dataset_name, t
                 item["option_A"],
                 item["option_B"],
                 args.video_fps,
+                args.video_num_frames,
                 args.video_max_pixels,
                 item.get("question"),
             )
             cached_vision = process_video_inputs(messages)
             cached_video_path = item["video_path"]
-        pred, raw_response = ask_model(
+        pred, raw_response, input_metadata = ask_model(
             model,
             processor,
             item["video_path"],
             item["option_A"],
             item["option_B"],
             args.video_fps,
+            args.video_num_frames,
             args.video_max_pixels,
             args.max_new_tokens,
             args.empty_cache_each_sample,
@@ -385,6 +481,7 @@ def evaluate_annotation(model, processor, args, annotation_path, dataset_name, t
             "prediction": pred,
             "is_correct": correct,
             "raw_response": raw_response,
+            "input_metadata": input_metadata,
         })
         results.append(result)
 
@@ -434,6 +531,35 @@ def evaluate_annotation(model, processor, args, annotation_path, dataset_name, t
         "dataset_slug": dataset_slug,
         "timestamp": timestamp,
         "run_dir": str(run_dir),
+        "model_load": {
+            "dtype": "float16" if not args.load_in_4bit else None,
+            "load_in_4bit": args.load_in_4bit,
+            "attn_implementation": args.attn_implementation,
+            "model_revision": args.model_revision,
+        },
+        "video_sampling_request": {
+            "fps": args.video_fps,
+            "num_frames": args.video_num_frames,
+            "max_pixels": args.video_max_pixels,
+            "min_pixels": None,
+        },
+        "decoding": {
+            "do_sample": False,
+            "num_beams": 1,
+            "max_new_tokens": args.max_new_tokens,
+        },
+        "output_parsing": {
+            "accepted_patterns": [
+                "leading A",
+                "leading B",
+                "contains ANSWER: A",
+                "contains ANSWER: B",
+                "contains OPTION A",
+                "contains OPTION B",
+            ],
+            "fallback": "UNKNOWN",
+            "unknown_scored_as_correct": False,
+        },
         "environment": environment_metadata(model),
     }
 
@@ -508,6 +634,13 @@ def main():
         help="Optional frames sampled per second from each video. Lower values reduce GPU memory use.",
     )
     parser.add_argument(
+        "--video_num_frames",
+        "--video-num-frames",
+        type=int,
+        default=None,
+        help="Optional fixed number of frames sampled from each video. Mutually exclusive with --video_fps.",
+    )
+    parser.add_argument(
         "--video_max_pixels",
         "--video-max-pixels",
         type=int,
@@ -549,6 +682,8 @@ def main():
 
     if bool(args.annotation_path) == bool(args.annotation_root):
         parser.error("Provide exactly one of --annotation_path or --annotation_root.")
+    if args.video_fps is not None and args.video_num_frames is not None:
+        parser.error("Use only one temporal sampling control: --video_fps or --video_num_frames.")
 
     if args.annotation_root:
         annotation_paths = sorted(Path(args.annotation_root).glob("*/annotations.jsonl"))
