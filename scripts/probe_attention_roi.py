@@ -1,12 +1,16 @@
 import argparse
+import inspect
 import json
 import math
+import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
 
 import cv2
 import numpy as np
 import torch
+import transformers
+from transformers.generation.utils import GenerationMixin
 
 try:
     from .common import PROJECT_ROOT, read_jsonl
@@ -398,20 +402,35 @@ def eos_token_ids(model):
     return {int(eos)}
 
 
+def generation_cache_api():
+    parameters = inspect.signature(
+        GenerationMixin.prepare_inputs_for_generation
+    ).parameters
+    if "next_sequence_length" in parameters:
+        return "next_sequence_length"
+    if "cache_position" in parameters:
+        return "cache_position"
+    raise RuntimeError(
+        "Unsupported Transformers generation API: neither next_sequence_length "
+        "nor cache_position is available."
+    )
+
+
 def greedy_generate_with_answer_attention(model, processor, inputs, max_new_tokens):
     prefill_kwargs = dict(inputs)
     prompt_length = int(inputs.input_ids.shape[1])
-    cache_position = torch.arange(
-        prompt_length,
-        dtype=torch.long,
-        device=inputs.input_ids.device,
-    )
+    cache_api = generation_cache_api()
     prefill_kwargs.update({
-        "cache_position": cache_position,
         "use_cache": True,
         "output_attentions": False,
         "return_dict": True,
     })
+    if cache_api == "cache_position":
+        prefill_kwargs["cache_position"] = torch.arange(
+            prompt_length,
+            dtype=torch.long,
+            device=inputs.input_ids.device,
+        )
     with torch.inference_mode():
         prefill = model_forward(model, prefill_kwargs)
 
@@ -462,18 +481,24 @@ def greedy_generate_with_answer_attention(model, processor, inputs, max_new_toke
                 ],
                 dim=-1,
             )
-        prepared = model.prepare_inputs_for_generation(
-            full_input_ids,
-            past_key_values=past_key_values,
-            attention_mask=attention_mask,
-            cache_position=torch.tensor(
+        prepare_kwargs = {
+            "past_key_values": past_key_values,
+            "attention_mask": attention_mask,
+            "use_cache": True,
+            "is_first_iteration": False,
+            **generation_kwargs,
+        }
+        if cache_api == "next_sequence_length":
+            prepare_kwargs["next_sequence_length"] = 1
+        else:
+            prepare_kwargs["cache_position"] = torch.tensor(
                 [prompt_length + len(generated) - 1],
                 dtype=torch.long,
                 device=full_input_ids.device,
-            ),
-            use_cache=True,
-            is_first_iteration=False,
-            **generation_kwargs,
+            )
+        prepared = model.prepare_inputs_for_generation(
+            full_input_ids,
+            **prepare_kwargs,
         )
         query = prepared.get("input_ids")
         if query is not None and query.shape[1] != 1:
@@ -671,18 +696,47 @@ def main():
         deterministic=args.deterministic,
         deterministic_warn_only=args.deterministic_warn_only,
     )
+    gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU"
+    gpu_memory_gb = (
+        torch.cuda.get_device_properties(0).total_memory / 1024**3
+        if torch.cuda.is_available()
+        else 0.0
+    )
+    print(
+        f"Attention probe runtime: transformers={transformers.__version__}, "
+        f"torch={torch.__version__}, device={gpu_name}, memory={gpu_memory_gb:.1f} GB, "
+        f"cache_api={generation_cache_api()}, rows={len(rows)}",
+        flush=True,
+    )
+    print(
+        f"Loading {args.model_name} with attention implementation "
+        f"{args.attn_implementation}...",
+        flush=True,
+    )
     model, processor = load_model(
         args.model_name,
         model_revision=args.model_revision,
         attn_implementation=args.attn_implementation,
     )
-    outputs = []
-    for idx, row in enumerate(rows, start=1):
-        print(f"Attention probe {idx}/{len(rows)}: {row.get('eval_id')}")
-        outputs.append(probe_row(model, processor, row, args))
-
     output_path = Path(args.output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    outputs = []
+    for idx, row in enumerate(rows, start=1):
+        print(f"Attention probe {idx}/{len(rows)}: {row.get('eval_id')}", flush=True)
+        try:
+            outputs.append(probe_row(model, processor, row, args))
+            output_path.write_text(
+                json.dumps(outputs, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            print(
+                f"Attention probe failed at {row.get('eval_id')}. Full traceback:",
+                flush=True,
+            )
+            traceback.print_exc()
+            raise
+
     output_path.write_text(json.dumps(outputs, ensure_ascii=False, indent=2), encoding="utf-8")
     config_path = output_path.with_name(f"{output_path.stem}_config.json")
     config_payload = {
@@ -692,6 +746,7 @@ def main():
             "_attn_implementation",
             args.attn_implementation,
         ),
+        "generation_cache_api": generation_cache_api(),
         "selected_eval_ids": [row.get("eval_id") for row in rows],
         "environment": environment_metadata(model),
     }
