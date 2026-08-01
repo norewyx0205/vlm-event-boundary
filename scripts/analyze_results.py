@@ -38,12 +38,35 @@ SIZE_SCENE_LABELS = {
     "clear_small_few": "Clear small / few",
     "clear_small_many": "Clear small / many",
 }
+PERTURBATION_ORDER = (
+    "original",
+    "mask_target_1",
+    "mask_target_2",
+    "mask_targets",
+    "mask_distractors",
+    "remove_visual_marker",
+)
+PERTURBATION_LABELS = {
+    "original": "Original",
+    "mask_target_1": "Mask target 1",
+    "mask_target_2": "Mask target 2",
+    "mask_targets": "Mask both targets",
+    "mask_distractors": "Mask distractors",
+    "remove_visual_marker": "Remove visual marker",
+}
 
 
 def ordered_size_scene_variants(rows, key="size_scene_variant"):
     present = {row.get(key) for row in rows}
     ordered = [variant for variant in SIZE_SCENE_VARIANTS if variant in present]
     extras = sorted(variant for variant in present if variant and variant not in ordered)
+    return ordered + extras
+
+
+def ordered_perturbations(rows, key="perturbation_type"):
+    present = {row.get(key) for row in rows}
+    ordered = [name for name in PERTURBATION_ORDER if name in present]
+    extras = sorted(name for name in present if name and name not in ordered)
     return ordered + extras
 
 
@@ -457,6 +480,113 @@ def paired_feature_comparison(rows):
             })
 
     return summary_rows, detail_rows
+
+
+def summarize_paired_changes(detail_rows, comparison_key):
+    summary_rows = []
+    for scope in ("by_condition", "overall"):
+        grouped = defaultdict(list)
+        for row in detail_rows:
+            key = (
+                row[comparison_key],
+                row["condition"] if scope == "by_condition" else "all",
+            )
+            grouped[key].append(row)
+
+        for (comparison, condition), items in sorted(grouped.items()):
+            directions = Counter(item["direction"] for item in items)
+            summary_rows.append({
+                "scope": scope,
+                "condition": condition,
+                comparison_key: comparison,
+                "pairs": len(items),
+                "baseline_accuracy": mean([item["baseline_correct"] for item in items]),
+                "perturbed_accuracy": mean([item["perturbed_correct"] for item in items]),
+                "mean_difference": mean([item["difference"] for item in items]),
+                "improved": directions.get("improved", 0),
+                "same": directions.get("same", 0),
+                "worse": directions.get("worse", 0),
+            })
+    return summary_rows
+
+
+def paired_perturbation_comparison(rows, baseline="original"):
+    by_unit = defaultdict(dict)
+    for row in rows:
+        perturbation_type = row.get("perturbation_type")
+        if not perturbation_type:
+            continue
+        source_video_id = row.get("source_video_id") or row.get("video_id")
+        key = (
+            row.get("_source_file", ""),
+            row.get("dataset_name", ""),
+            source_video_id,
+            row.get("condition", ""),
+            row.get("prompt_variant", ""),
+        )
+        by_unit[key][perturbation_type] = int(bool(row.get("is_correct", False)))
+
+    detail_rows = []
+    for key, values in by_unit.items():
+        if baseline not in values:
+            continue
+        source_file, dataset_name, source_video_id, condition, prompt_variant = key
+        for perturbation_type, perturbed_correct in sorted(values.items()):
+            if perturbation_type == baseline:
+                continue
+            baseline_correct = values[baseline]
+            difference = perturbed_correct - baseline_correct
+            detail_rows.append({
+                "source_file": source_file,
+                "dataset_name": dataset_name,
+                "source_video_id": source_video_id,
+                "condition": condition,
+                "prompt_variant": prompt_variant,
+                "baseline_perturbation": baseline,
+                "perturbation_type": perturbation_type,
+                "baseline_correct": baseline_correct,
+                "perturbed_correct": perturbed_correct,
+                "difference": difference,
+                "direction": "improved" if difference > 0 else "worse" if difference < 0 else "same",
+            })
+    return summarize_paired_changes(detail_rows, "perturbation_type"), detail_rows
+
+
+def paired_perturbation_strict_comparison(swap_details, baseline="original"):
+    by_unit = defaultdict(dict)
+    for row in swap_details:
+        perturbation_type = row.get("perturbation_type")
+        if not perturbation_type:
+            continue
+        key = (
+            row.get("source_file", ""),
+            row.get("video_id", ""),
+            row.get("condition", ""),
+        )
+        by_unit[key][perturbation_type] = int(row.get("category") == "both_correct")
+
+    detail_rows = []
+    for key, values in by_unit.items():
+        if baseline not in values:
+            continue
+        source_file, source_video_id, condition = key
+        for perturbation_type, perturbed_correct in sorted(values.items()):
+            if perturbation_type == baseline:
+                continue
+            baseline_correct = values[baseline]
+            difference = perturbed_correct - baseline_correct
+            detail_rows.append({
+                "source_file": source_file,
+                "source_video_id": source_video_id,
+                "condition": condition,
+                "baseline_perturbation": baseline,
+                "perturbation_type": perturbation_type,
+                "baseline_correct": baseline_correct,
+                "perturbed_correct": perturbed_correct,
+                "difference": difference,
+                "direction": "improved" if difference > 0 else "worse" if difference < 0 else "same",
+            })
+    return summarize_paired_changes(detail_rows, "perturbation_type"), detail_rows
 
 
 def size_factorial_effects(size_scene_rows, strict_by_scene):
@@ -1263,6 +1393,32 @@ def main():
         diagnostic_swap_details,
         ["diagnostic_type", "condition"],
     )
+    perturbation_rows = [row for row in rows if row.get("perturbation_type")]
+    perturbation_swap_details = [row for row in swap_details if row.get("perturbation_type")]
+    by_perturbation = (
+        grouped_accuracy(perturbation_rows, ["perturbation_type"])
+        if perturbation_rows else []
+    )
+    by_perturbation_condition = (
+        grouped_accuracy(perturbation_rows, ["perturbation_type", "condition"])
+        if perturbation_rows else []
+    )
+    strict_by_perturbation = strict_pair_metrics(
+        perturbation_rows,
+        perturbation_swap_details,
+        ["perturbation_type"],
+    )
+    strict_by_perturbation_condition = strict_pair_metrics(
+        perturbation_rows,
+        perturbation_swap_details,
+        ["perturbation_type", "condition"],
+    )
+    paired_perturbation_summary, paired_perturbation_details = (
+        paired_perturbation_comparison(perturbation_rows)
+    )
+    paired_perturbation_strict_summary, paired_perturbation_strict_details = (
+        paired_perturbation_strict_comparison(perturbation_swap_details)
+    )
     model_input_boundary = model_input_by_boundary(rows)
 
     write_csv(output_dir / "accuracy_by_difficulty.csv", by_difficulty)
@@ -1302,6 +1458,23 @@ def main():
     write_csv(output_dir / "accuracy_by_diagnostic_type_correct_option.csv", by_diagnostic_type_correct_option)
     write_csv(output_dir / "strict_pair_by_diagnostic_type.csv", strict_by_diagnostic_type)
     write_csv(output_dir / "strict_pair_by_diagnostic_type_condition.csv", strict_by_diagnostic_type_condition)
+    write_csv(output_dir / "accuracy_by_perturbation.csv", by_perturbation)
+    write_csv(output_dir / "accuracy_by_perturbation_condition.csv", by_perturbation_condition)
+    write_csv(output_dir / "strict_pair_by_perturbation.csv", strict_by_perturbation)
+    write_csv(
+        output_dir / "strict_pair_by_perturbation_condition.csv",
+        strict_by_perturbation_condition,
+    )
+    write_csv(output_dir / "paired_perturbation_summary.csv", paired_perturbation_summary)
+    write_csv(output_dir / "paired_perturbation_details.csv", paired_perturbation_details)
+    write_csv(
+        output_dir / "paired_perturbation_strict_summary.csv",
+        paired_perturbation_strict_summary,
+    )
+    write_csv(
+        output_dir / "paired_perturbation_strict_details.csv",
+        paired_perturbation_strict_details,
+    )
     write_csv(output_dir / "model_input_by_boundary.csv", model_input_boundary)
 
     summary = {
@@ -1338,6 +1511,12 @@ def main():
         "accuracy_by_diagnostic_type_correct_option": by_diagnostic_type_correct_option,
         "strict_pair_by_diagnostic_type": strict_by_diagnostic_type,
         "strict_pair_by_diagnostic_type_condition": strict_by_diagnostic_type_condition,
+        "accuracy_by_perturbation": by_perturbation,
+        "accuracy_by_perturbation_condition": by_perturbation_condition,
+        "strict_pair_by_perturbation": strict_by_perturbation,
+        "strict_pair_by_perturbation_condition": strict_by_perturbation_condition,
+        "paired_perturbation_summary": paired_perturbation_summary,
+        "paired_perturbation_strict_summary": paired_perturbation_strict_summary,
         "model_input_by_boundary": model_input_boundary,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1601,6 +1780,80 @@ def main():
                 labels=diagnostic_labels,
                 x_axis_label="Diagnostic type",
                 y_label="Strict pair",
+            )
+        if by_perturbation_condition:
+            perturbation_variants = ordered_perturbations(by_perturbation_condition)
+            perturbation_labels = {
+                name: PERTURBATION_LABELS.get(name, name.replace("_", " ").title())
+                for name in perturbation_variants
+            }
+            perturbation_plot_rows = [
+                {
+                    "feature_variant": row["perturbation_type"],
+                    "condition": row["condition"],
+                    "accuracy": row["accuracy"],
+                }
+                for row in by_perturbation_condition
+            ]
+            make_feature_plot(
+                perturbation_plot_rows,
+                output_dir / "accuracy_by_perturbation_condition.png",
+                title="Prompt accuracy under ROI perturbations",
+                variants=perturbation_variants,
+                labels=perturbation_labels,
+                x_axis_label="ROI perturbation",
+                y_label="Prompt accuracy",
+            )
+        if strict_by_perturbation_condition:
+            perturbation_variants = ordered_perturbations(strict_by_perturbation_condition)
+            perturbation_labels = {
+                name: PERTURBATION_LABELS.get(name, name.replace("_", " ").title())
+                for name in perturbation_variants
+            }
+            strict_perturbation_plot_rows = [
+                {
+                    "feature_variant": row["perturbation_type"],
+                    "condition": row["condition"],
+                    "accuracy": row["strict_both_correct"],
+                }
+                for row in strict_by_perturbation_condition
+            ]
+            make_feature_plot(
+                strict_perturbation_plot_rows,
+                output_dir / "strict_pair_by_perturbation_condition.png",
+                title="Strict both-correct under ROI perturbations",
+                variants=perturbation_variants,
+                labels=perturbation_labels,
+                x_axis_label="ROI perturbation",
+                y_label="Strict pair",
+            )
+        if strict_by_perturbation:
+            perturbation_variants = ordered_perturbations(strict_by_perturbation)
+            perturbation_labels = {
+                name: PERTURBATION_LABELS.get(name, name.replace("_", " ").title())
+                for name in perturbation_variants
+            }
+            perturbation_values = {}
+            for row in strict_by_perturbation:
+                label = perturbation_labels[row["perturbation_type"]]
+                perturbation_values[(label, "Prompt accuracy")] = row["prompt_accuracy"]
+                perturbation_values[(label, "Strict both-correct")] = row["strict_both_correct"]
+            make_grouped_bar_plot(
+                [perturbation_labels[name] for name in perturbation_variants],
+                ["Prompt accuracy", "Strict both-correct"],
+                perturbation_values,
+                "Prompt accuracy versus strict pair by ROI perturbation",
+                output_dir / "accuracy_vs_strict_pair_by_perturbation.png",
+            )
+            make_pair_outcome_plot(
+                [
+                    {**row, "feature_variant": row["perturbation_type"]}
+                    for row in strict_by_perturbation
+                ],
+                output_dir / "pair_outcomes_by_perturbation.png",
+                variants=perturbation_variants,
+                labels=perturbation_labels,
+                title="Mirrored-pair outcomes under ROI perturbations",
             )
 
     print(f"Analyzed {len(rows)} rows from {len(result_files)} raw result file(s).")

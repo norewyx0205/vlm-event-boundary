@@ -307,27 +307,96 @@ python scripts/analyze_results.py \
 `strict_pair_by_diagnostic_type_condition.png`.
 
 For causal perturbation, create masked-video variants and evaluate them with the
-same runner:
+same runner. `original` is included as a matched control and does not duplicate
+the source video. `--max_base_samples` samples complete base stimuli, so both
+mirrored prompts and all selected boundary conditions remain paired.
 
 ```bash
 python scripts/make_roi_perturbation_dataset.py \
   --annotation_path data/l5_feature_ablation_v1/size_clear_contrast_pilot/L5_size_only_clear_small_many/annotations.jsonl \
-  --output_root data/perturbations/l5_clear_small_many
+  --output_root data/perturbations/l5_clear_small_many \
+  --max_base_samples 10 \
+  --perturbations original,mask_target_1,mask_target_2,mask_distractors,remove_visual_marker \
+  --mask_mode dynamic \
+  --mask_scope all_frames \
+  --mask_padding 6
+
+python scripts/visualize_roi_perturbations.py \
+  --annotation_path data/perturbations/l5_clear_small_many/annotations.jsonl \
+  --condition visual_boundary \
+  --output_path analysis/l5_clear_small_many_roi_qa.png
+
+python scripts/run_eval.py \
+  --annotation_path data/perturbations/l5_clear_small_many/annotations.jsonl \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --dataset_name l5_clear_small_many_perturbation \
+  --output_dir results
+
+python scripts/analyze_results.py \
+  --input results \
+  --dataset_name_prefix l5_clear_small_many_perturbation \
+  --latest_per_dataset \
+  --output_dir analysis/l5_clear_small_many_perturbation \
+  --plots
 ```
 
+The dynamic mask follows each object's annotated path instead of erasing its
+whole trajectory. `all_frames` tests dependence on persistent object identity;
+use `--mask_scope motion_window` as a narrower motion-evidence ablation.
+On the current 512-pixel stimuli, a local padding sweep found that `0` pixels
+left a codec halo, `3` removed the visible edge, and `6` provided a conservative
+clean mask without approaching neighbouring objects; therefore `6` is the
+recommended default and should still be checked in the generated QA sheet.
+Visual-marker frames are protected from object masks, and
+`remove_visual_marker` reconstructs the underlying scene only where the marker
+appears. Source audio is preserved by default. The dataset folder also records
+`perturbation_stats.jsonl`, including affected frames and pixel fractions.
+Perturbation analyses report prompt accuracy, strict-pair accuracy, and matched
+original-versus-perturbed changes.
+
 For small-sample attention inspection, use the ROI probe. This is intentionally
-separate from `run_eval.py` because `output_attentions=True` is memory-heavy.
+separate from `run_eval.py`: eager attention is required, while the probe uses a
+cached single answer-token query to avoid retaining the full prompt attention
+matrix.
 
 ```bash
 python scripts/probe_attention_roi.py \
   --annotation_path data/l5_feature_ablation_v1/size_clear_contrast_pilot/L5_size_only_clear_small_many/annotations.jsonl \
   --output_path analysis/attention/l5_clear_small_many_attention.json \
+  --visualization_dir analysis/attention/l5_clear_small_many_figures \
   --model_name Qwen/Qwen3-VL-8B-Instruct \
   --model_revision 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
-  --max_samples 8
+  --seed 42 \
+  --deterministic \
+  --attn_implementation eager \
+  --conditions temporal_boundary,visual_boundary \
+  --prompt_variants original,swapped \
+  --max_samples 8 \
+  --roi_padding 8 \
+  --visualization_layer -1 \
+  --head_reduction mean \
+  --empty_cache_each_sample
 ```
 
-This produces feature-level accuracy, strict mirrored-pair accuracy, the accuracy-strict gap `d`, position-sensitive pair rates, paired boundary/feature differences, and swap-consistency diagnostics. Report plots include:
+The probe maps model-visible video tokens through `video_grid_thw`, accounts for
+Qwen3-VL spatial merging, and uses the processor's sampled source-frame indices.
+For every inspected evaluation row it writes:
+
+- an answer-token attention overlay on representative source frames
+- a temporal attention profile with event and boundary phases
+- a decoder-layer by ROI enrichment heatmap
+- JSON metadata with the sampled grid, selected answer token, spatial ROI mass,
+  temporal phase mass, and per-layer ROI profiles
+
+ROI enrichment is attention share divided by token-area share, which prevents a
+large background region from looking important merely because it contains more
+tokens. Attention remains a qualitative association: interpret it together with
+the matched ROI perturbation effects, not as standalone causal evidence.
+
+Across the behavioral experiments, `analyze_results.py` produces feature-level
+accuracy, strict mirrored-pair accuracy, the accuracy-strict gap `d`,
+position-sensitive pair rates, paired boundary/feature differences, and
+swap-consistency diagnostics. Report plots include:
 
 - prompt accuracy versus strict both-correct accuracy
 - mirrored-pair outcome proportions

@@ -907,11 +907,13 @@ def generate_level(level, args, durations, target_identity_specs):
                         "radius": d.get("radius"),
                         "size_label": d.get("size_label", ""),
                         "motion_timing": d.get("motion_timing", "none"),
+                        "start_frame": d["motion"]["start_frame"],
+                        "end_frame": d["motion"]["end_frame"],
                         "direction": d["path"]["direction"],
                         "from": d["path"]["from"],
                         "to": d["path"]["to"],
                     }
-                    for d in distractors
+                    for d in timed_dist
                 ],
                 "distractor_count": len(distractors),
                 "static_distractor_count": sum(1 for d in distractors if d["motion_kind"] == "static"),
