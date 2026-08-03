@@ -416,15 +416,55 @@ def generation_cache_api():
     )
 
 
+def cache_sequence_length(past_key_values):
+    if past_key_values is None:
+        return 0
+    get_seq_length = getattr(past_key_values, "get_seq_length", None)
+    if callable(get_seq_length):
+        return int(get_seq_length())
+    try:
+        return int(past_key_values[0][0].shape[-2])
+    except (IndexError, TypeError, AttributeError):
+        return None
+
+
+def prepare_prefill_position_ids(model, inputs, cache_api):
+    if cache_api != "next_sequence_length":
+        return None
+    prepare_positions = getattr(model, "_prepare_position_ids_for_generation", None)
+    if not callable(prepare_positions):
+        raise RuntimeError(
+            "Transformers 5.x attention probing requires the model's generation "
+            "position-id helper, but it is unavailable."
+        )
+    return prepare_positions(inputs.input_ids, dict(inputs))
+
+
+def extend_position_ids(position_ids, generated_length):
+    if position_ids is None:
+        return None
+    offset_shape = [1] * (position_ids.ndim - 1) + [generated_length]
+    offsets = torch.arange(
+        1,
+        generated_length + 1,
+        dtype=position_ids.dtype,
+        device=position_ids.device,
+    ).view(*offset_shape)
+    return torch.cat([position_ids, position_ids[..., -1:] + offsets], dim=-1)
+
+
 def greedy_generate_with_answer_attention(model, processor, inputs, max_new_tokens):
     prefill_kwargs = dict(inputs)
     prompt_length = int(inputs.input_ids.shape[1])
     cache_api = generation_cache_api()
+    prefill_position_ids = prepare_prefill_position_ids(model, inputs, cache_api)
     prefill_kwargs.update({
         "use_cache": True,
         "output_attentions": False,
         "return_dict": True,
     })
+    if prefill_position_ids is not None:
+        prefill_kwargs["position_ids"] = prefill_position_ids
     if cache_api == "cache_position":
         prefill_kwargs["cache_position"] = torch.arange(
             prompt_length,
@@ -469,6 +509,9 @@ def greedy_generate_with_answer_attention(model, processor, inputs, max_new_toke
             dim=-1,
         )
         generation_kwargs = dict(static_kwargs)
+        step_position_ids = extend_position_ids(prefill_position_ids, len(generated))
+        if step_position_ids is not None:
+            generation_kwargs["position_ids"] = step_position_ids
         if base_mm_types is not None:
             generation_kwargs["mm_token_type_ids"] = torch.cat(
                 [
@@ -501,10 +544,38 @@ def greedy_generate_with_answer_attention(model, processor, inputs, max_new_toke
             **prepare_kwargs,
         )
         query = prepared.get("input_ids")
-        if query is not None and query.shape[1] != 1:
+        query_embeds = prepared.get("inputs_embeds")
+        query_length = (
+            int(query.shape[1])
+            if query is not None
+            else int(query_embeds.shape[1])
+            if query_embeds is not None
+            else None
+        )
+        if query_length != 1:
             raise RuntimeError(
                 "Cached attention probe did not reduce the decoder query to one token; "
-                "refusing a full QxK attention allocation."
+                f"got query_length={query_length}. Refusing a full QxK attention allocation."
+            )
+        for sequence_key in ("position_ids", "mm_token_type_ids"):
+            value = prepared.get(sequence_key)
+            if value is not None and value.shape[-1] != query_length:
+                prepared[sequence_key] = value[..., -query_length:].clone(
+                    memory_format=torch.contiguous_format
+                )
+        cache_length = cache_sequence_length(past_key_values)
+        expected_cache_length = prompt_length + len(generated) - 1
+        if cache_length is not None and cache_length != expected_cache_length:
+            raise RuntimeError(
+                "Cached attention probe found an unexpected KV-cache length before "
+                f"the decoder step: cache={cache_length}, expected={expected_cache_length}."
+            )
+        prepared_mask = prepared.get("attention_mask")
+        expected_mask_length = expected_cache_length + query_length
+        if prepared_mask is not None and prepared_mask.shape[-1] != expected_mask_length:
+            raise RuntimeError(
+                "Cached attention probe found an incompatible attention mask: "
+                f"mask={prepared_mask.shape[-1]}, expected={expected_mask_length}."
             )
         prepared.update({
             "use_cache": True,
@@ -553,6 +624,11 @@ def greedy_generate_with_answer_attention(model, processor, inputs, max_new_toke
         "selected_token_id": selected_token_id,
         "selected_token_text": selected_token_text,
         "generated_token_ids": [int(token[0, 0]) for token in generated],
+        "cache_api": cache_api,
+        "prompt_length": prompt_length,
+        "prefill_position_ids_shape": (
+            list(prefill_position_ids.shape) if prefill_position_ids is not None else None
+        ),
     }
 
 
@@ -747,6 +823,7 @@ def main():
             args.attn_implementation,
         ),
         "generation_cache_api": generation_cache_api(),
+        "attention_cache_strategy": "prefill_mrope_then_single_token_decode",
         "selected_eval_ids": [row.get("eval_id") for row in rows],
         "environment": environment_metadata(model),
     }
