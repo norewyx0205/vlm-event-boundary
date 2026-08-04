@@ -14,7 +14,12 @@ from transformers.generation.utils import GenerationMixin
 
 try:
     from .common import PROJECT_ROOT, read_jsonl
-    from .make_roi_perturbation_dataset import object_position, timed_distractor, visual_marker_window
+    from .make_roi_perturbation_dataset import (
+        object_position,
+        shape_mask,
+        timed_distractor,
+        visual_marker_window,
+    )
     from .run_eval import (
         build_messages,
         configure_reproducibility,
@@ -27,7 +32,12 @@ try:
     from .visualize_attention_roi import write_visualizations
 except ImportError:
     from common import PROJECT_ROOT, read_jsonl
-    from make_roi_perturbation_dataset import object_position, timed_distractor, visual_marker_window
+    from make_roi_perturbation_dataset import (
+        object_position,
+        shape_mask,
+        timed_distractor,
+        visual_marker_window,
+    )
     from run_eval import (
         build_messages,
         configure_reproducibility,
@@ -214,21 +224,97 @@ def spatial_roi(row, x, y, frame_idx, roi_padding, width, height):
     return "background"
 
 
-def token_descriptors(row, grid_t, merged_h, merged_w, width, height, frame_indices, roi_padding):
+def spatial_roi_label_map(row, frame_idx, roi_padding, width, height):
+    label_map = np.full((height, width), "background", dtype=object)
+    marker_window = visual_marker_window(row, 0)
+    if marker_window is not None and marker_window[0] <= frame_idx < marker_window[1]:
+        label_map[:] = "boundary_flash"
+        marker_mask = np.zeros((height, width), dtype=np.uint8)
+        cv2.circle(
+            marker_mask,
+            (width // 2, height // 2),
+            48 + roi_padding,
+            255,
+            -1,
+        )
+        label_map[marker_mask > 0] = "visual_marker"
+        return label_map
+
+    assigned = np.zeros((height, width), dtype=bool)
+    targets = sorted(row.get("target_objects") or [], key=lambda item: item["id"])
+    for target in targets:
+        mask = shape_mask(
+            (height, width, 3),
+            target,
+            object_position(target, frame_idx),
+            roi_padding,
+        ) > 0
+        mask &= ~assigned
+        label_map[mask] = f"target_{target['id']}"
+        assigned |= mask
+
+    distractor_mask = np.zeros((height, width), dtype=bool)
+    for distractor in row.get("distractors") or []:
+        distractor = timed_distractor(row, distractor)
+        distractor_mask |= shape_mask(
+            (height, width, 3),
+            distractor,
+            object_position(distractor, frame_idx),
+            roi_padding,
+        ) > 0
+    distractor_mask &= ~assigned
+    label_map[distractor_mask] = "distractors"
+    return label_map
+
+
+def cell_roi_weights(label_map, x_idx, y_idx, merged_w, merged_h, width, height):
+    x0 = int(round(x_idx * width / merged_w))
+    x1 = int(round((x_idx + 1) * width / merged_w))
+    y0 = int(round(y_idx * height / merged_h))
+    y1 = int(round((y_idx + 1) * height / merged_h))
+    cell = label_map[y0:y1, x0:x1]
+    labels, counts = np.unique(cell, return_counts=True)
+    total = max(1, int(counts.sum()))
+    return {str(label): int(count) / total for label, count in zip(labels, counts)}
+
+
+def token_descriptors(
+    row,
+    grid_t,
+    merged_h,
+    merged_w,
+    width,
+    height,
+    frame_indices,
+    roi_padding,
+    roi_assignment,
+):
     descriptors = []
     for temporal_idx in range(grid_t):
         source_frame = frame_indices[temporal_idx]
         phase = temporal_phase(row, source_frame)
+        label_map = (
+            spatial_roi_label_map(row, source_frame, roi_padding, width, height)
+            if roi_assignment == "overlap"
+            else None
+        )
         for y_idx in range(merged_h):
             y = (y_idx + 0.5) * height / merged_h
             for x_idx in range(merged_w):
                 x = (x_idx + 0.5) * width / merged_w
-                descriptors.append({
-                    "temporal_index": temporal_idx,
-                    "source_frame": source_frame,
-                    "x_index": x_idx,
-                    "y_index": y_idx,
-                    "spatial_roi": spatial_roi(
+                if label_map is not None:
+                    weights = cell_roi_weights(
+                        label_map,
+                        x_idx,
+                        y_idx,
+                        merged_w,
+                        merged_h,
+                        width,
+                        height,
+                    )
+                    dominant = max(weights, key=weights.get)
+                else:
+                    dominant = spatial_roi(
                         row,
                         x,
                         y,
@@ -236,25 +322,37 @@ def token_descriptors(row, grid_t, merged_h, merged_w, width, height, frame_indi
                         roi_padding,
                         width,
                         height,
-                    ),
+                    )
+                    weights = {dominant: 1.0}
+                descriptors.append({
+                    "temporal_index": temporal_idx,
+                    "source_frame": source_frame,
+                    "x_index": x_idx,
+                    "y_index": y_idx,
+                    "spatial_roi": dominant,
+                    "spatial_roi_weights": weights,
                     "temporal_phase": phase,
                 })
     return descriptors
 
 
-def attention_distribution(scores, labels):
+def attention_distribution(scores, assignments):
     total_attention = float(scores.sum())
-    counts = Counter(labels)
+    counts = defaultdict(float)
     masses = defaultdict(float)
-    for score, label in zip(scores.tolist(), labels):
-        masses[label] += float(score)
-    total_tokens = len(labels)
+    for score, assignment in zip(scores.tolist(), assignments):
+        weights = assignment if isinstance(assignment, dict) else {assignment: 1.0}
+        for label, weight in weights.items():
+            counts[label] += float(weight)
+            masses[label] += float(score) * float(weight)
+    total_tokens = len(assignments)
     output = {}
     for label in sorted(counts):
         token_fraction = counts[label] / total_tokens if total_tokens else 0.0
         normalized_attention = masses[label] / total_attention if total_attention else 0.0
         output[label] = {
             "token_count": counts[label],
+            "effective_token_count": counts[label],
             "token_fraction": token_fraction,
             "attention_mass": masses[label],
             "normalized_visual_attention": normalized_attention,
@@ -292,6 +390,8 @@ def aggregate_attention(
     video_path,
     video_kwargs,
     roi_padding,
+    roi_assignment,
+    roi_padding_sensitivity,
     layer_index,
     head_reduction,
 ):
@@ -326,8 +426,9 @@ def aggregate_attention(
         height,
         frame_indices,
         roi_padding,
+        roi_assignment,
     )
-    spatial_labels = [item["spatial_roi"] for item in descriptors]
+    spatial_assignments = [item["spatial_roi_weights"] for item in descriptors]
     temporal_labels = [item["temporal_phase"] for item in descriptors]
     selected_layer = select_layer_index(layer_index, len(attentions))
 
@@ -344,7 +445,7 @@ def aggregate_attention(
         layer_profiles.append({
             "layer": idx,
             "visual_attention_fraction": float(visual_scores.sum() / max(float(all_scores.sum()), 1e-12)),
-            "spatial_roi": attention_distribution(visual_scores, spatial_labels),
+            "spatial_roi": attention_distribution(visual_scores, spatial_assignments),
             "temporal_phase": attention_distribution(visual_scores, temporal_labels),
         })
         if idx == selected_layer:
@@ -356,6 +457,23 @@ def aggregate_attention(
     temporal_attention = attention_map.sum(dim=(1, 2)).tolist()
     temporal_phases = [temporal_phase(row, frame_idx) for frame_idx in frame_indices]
     targets = sorted(row.get("target_objects") or [], key=lambda item: item["id"])
+    padding_profiles = {}
+    for padding in roi_padding_sensitivity:
+        padding_descriptors = token_descriptors(
+            row,
+            grid_t,
+            merged_h,
+            merged_w,
+            width,
+            height,
+            frame_indices,
+            padding,
+            roi_assignment,
+        )
+        padding_profiles[str(padding)] = attention_distribution(
+            selected_scores,
+            [item["spatial_roi_weights"] for item in padding_descriptors],
+        )
 
     return {
         "video_token_position_source": position_source,
@@ -368,10 +486,13 @@ def aggregate_attention(
         "source_frame_indices": frame_indices,
         "selected_layer": selected_layer,
         "head_reduction": head_reduction,
+        "roi_assignment_method": roi_assignment,
+        "roi_padding": roi_padding,
+        "roi_padding_sensitivity": padding_profiles,
         "selected_layer_visual_attention_fraction": float(
             selected_scores.sum() / max(float(selected_all_scores.sum()), 1e-12)
         ),
-        "spatial_roi_attention": attention_distribution(selected_scores, spatial_labels),
+        "spatial_roi_attention": attention_distribution(selected_scores, spatial_assignments),
         "temporal_phase_attention": attention_distribution(selected_scores, temporal_labels),
         "temporal_attention": temporal_attention,
         "temporal_phases": temporal_phases,
@@ -453,21 +574,97 @@ def extend_position_ids(position_ids, generated_length):
     return torch.cat([position_ids, position_ids[..., -1:] + offsets], dim=-1)
 
 
-def greedy_generate_with_answer_attention(model, processor, inputs, max_new_tokens):
-    prefill_kwargs = dict(inputs)
+def standard_first_token(model, inputs):
+    with torch.inference_mode():
+        generated = model.generate(
+            **inputs,
+            max_new_tokens=1,
+            do_sample=False,
+            num_beams=1,
+            return_dict_in_generate=True,
+            output_scores=True,
+        )
     prompt_length = int(inputs.input_ids.shape[1])
+    token_id = int(generated.sequences[0, prompt_length])
+    if not generated.scores:
+        raise RuntimeError("Standard generation did not return first-token scores for parity validation.")
+    scores = generated.scores[0][0].float().detach().cpu()
+    return token_id, scores
+
+
+def validate_single_token_query(prepared, cache_length, expected_cache_length):
+    query = prepared.get("input_ids")
+    query_embeds = prepared.get("inputs_embeds")
+    query_length = (
+        int(query.shape[1])
+        if query is not None
+        else int(query_embeds.shape[1])
+        if query_embeds is not None
+        else None
+    )
+    if query_length != 1:
+        raise RuntimeError(
+            "Cached attention probe did not reduce the decoder query to one token; "
+            f"got query_length={query_length}. Refusing a full QxK attention allocation."
+        )
+    for sequence_key in ("position_ids", "mm_token_type_ids"):
+        value = prepared.get(sequence_key)
+        if value is not None and value.shape[-1] != query_length:
+            prepared[sequence_key] = value[..., -query_length:].clone(
+                memory_format=torch.contiguous_format
+            )
+    if cache_length is not None and cache_length != expected_cache_length:
+        raise RuntimeError(
+            "Cached attention probe found an unexpected KV-cache length before "
+            f"the decoder step: cache={cache_length}, expected={expected_cache_length}."
+        )
+    prepared_mask = prepared.get("attention_mask")
+    expected_mask_length = expected_cache_length + query_length
+    if prepared_mask is not None and prepared_mask.shape[-1] != expected_mask_length:
+        raise RuntimeError(
+            "Cached attention probe found an incompatible attention mask: "
+            f"mask={prepared_mask.shape[-1]}, expected={expected_mask_length}."
+        )
+    return query_length
+
+
+def greedy_generate_with_decision_attention(
+    model,
+    processor,
+    inputs,
+    max_new_tokens,
+    verify_standard_generation=True,
+    require_standard_logits_match=True,
+    parity_rtol=1e-3,
+    parity_atol=1e-3,
+):
+    prompt_length = int(inputs.input_ids.shape[1])
+    if prompt_length < 2:
+        raise RuntimeError("Decision-position probing requires at least two prompt tokens.")
+    prefix_length = prompt_length - 1
     cache_api = generation_cache_api()
-    prefill_position_ids = prepare_prefill_position_ids(model, inputs, cache_api)
+    full_position_ids = prepare_prefill_position_ids(model, inputs, cache_api)
+    standard_token_id = None
+    standard_scores = None
+    if verify_standard_generation:
+        standard_token_id, standard_scores = standard_first_token(model, inputs)
+
+    prefill_kwargs = dict(inputs)
+    prefill_kwargs["input_ids"] = inputs.input_ids[:, :prefix_length]
+    if getattr(inputs, "attention_mask", None) is not None:
+        prefill_kwargs["attention_mask"] = inputs.attention_mask[:, :prefix_length]
+    if getattr(inputs, "mm_token_type_ids", None) is not None:
+        prefill_kwargs["mm_token_type_ids"] = inputs.mm_token_type_ids[:, :prefix_length]
     prefill_kwargs.update({
         "use_cache": True,
         "output_attentions": False,
         "return_dict": True,
     })
-    if prefill_position_ids is not None:
-        prefill_kwargs["position_ids"] = prefill_position_ids
+    if full_position_ids is not None:
+        prefill_kwargs["position_ids"] = full_position_ids[..., :prefix_length]
     if cache_api == "cache_position":
         prefill_kwargs["cache_position"] = torch.arange(
-            prompt_length,
+            prefix_length,
             dtype=torch.long,
             device=inputs.input_ids.device,
         )
@@ -475,58 +672,124 @@ def greedy_generate_with_answer_attention(model, processor, inputs, max_new_toke
         prefill = model_forward(model, prefill_kwargs)
 
     past_key_values = prefill.past_key_values
-    next_token = prefill.logits[:, -1, :].argmax(dim=-1, keepdim=True)
     full_input_ids = inputs.input_ids
-    base_attention_mask = getattr(inputs, "attention_mask", None)
-    if base_attention_mask is None:
-        base_attention_mask = torch.ones_like(full_input_ids)
-    base_mm_types = getattr(inputs, "mm_token_type_ids", None)
+    full_attention_mask = getattr(inputs, "attention_mask", None)
+    if full_attention_mask is None:
+        full_attention_mask = torch.ones_like(full_input_ids)
+    full_mm_types = getattr(inputs, "mm_token_type_ids", None)
     static_kwargs = {
         key: value
         for key, value in inputs.items()
         if key not in {"input_ids", "attention_mask", "position_ids", "mm_token_type_ids"}
     }
-    generated = []
-    attention_steps = []
-    eos_ids = eos_token_ids(model)
+    decision_kwargs = {
+        "past_key_values": past_key_values,
+        "attention_mask": full_attention_mask,
+        "use_cache": True,
+        "is_first_iteration": False,
+        **static_kwargs,
+    }
+    if full_position_ids is not None:
+        decision_kwargs["position_ids"] = full_position_ids
+    if full_mm_types is not None:
+        decision_kwargs["mm_token_type_ids"] = full_mm_types
+    if cache_api == "next_sequence_length":
+        decision_kwargs["next_sequence_length"] = 1
+    else:
+        decision_kwargs["cache_position"] = torch.tensor(
+            [prefix_length], dtype=torch.long, device=full_input_ids.device
+        )
+    prepared = model.prepare_inputs_for_generation(full_input_ids, **decision_kwargs)
+    validate_single_token_query(
+        prepared,
+        cache_sequence_length(past_key_values),
+        prefix_length,
+    )
+    prepared.update({
+        "use_cache": True,
+        "output_attentions": True,
+        "return_dict": True,
+    })
+    with torch.inference_mode():
+        decision_output = model_forward(model, prepared)
+    if not decision_output.attentions or decision_output.attentions[0] is None:
+        raise RuntimeError(
+            "Decoder attentions are unavailable. Run the probe with --attn_implementation eager."
+        )
 
-    for _ in range(max_new_tokens):
+    decision_scores = decision_output.logits[:, -1, :]
+    next_token = decision_scores.argmax(dim=-1, keepdim=True)
+    decision_token_id = int(next_token[0, 0])
+    first_token_match = (
+        decision_token_id == standard_token_id
+        if standard_token_id is not None
+        else None
+    )
+    if first_token_match is False:
+        raise RuntimeError(
+            "Decision-position cache split changed the standard greedy first token: "
+            f"decision={decision_token_id}, standard={standard_token_id}."
+        )
+
+    logits_max_abs_diff = None
+    logits_allclose = None
+    if standard_scores is not None:
+        decision_cpu = decision_scores[0].float().detach().cpu()
+        logits_max_abs_diff = float((decision_cpu - standard_scores).abs().max())
+        logits_allclose = bool(
+            torch.allclose(
+                decision_cpu,
+                standard_scores,
+                rtol=parity_rtol,
+                atol=parity_atol,
+            )
+        )
+        if require_standard_logits_match and not logits_allclose:
+            raise RuntimeError(
+                "Decision-position cache split changed the standard first-token logits: "
+                f"max_abs_diff={logits_max_abs_diff:.6g}, rtol={parity_rtol}, atol={parity_atol}."
+            )
+
+    past_key_values = decision_output.past_key_values
+    generated = []
+    eos_ids = eos_token_ids(model)
+    for generated_index in range(max_new_tokens):
         token_id = int(next_token[0, 0])
         generated.append(next_token)
-        if token_id in eos_ids:
+        if token_id in eos_ids or generated_index + 1 >= max_new_tokens:
             break
 
         full_input_ids = torch.cat([full_input_ids, next_token], dim=-1)
-        attention_mask = torch.cat(
+        full_attention_mask = torch.cat(
             [
-                base_attention_mask,
+                full_attention_mask,
                 torch.ones(
-                    (base_attention_mask.shape[0], len(generated)),
-                    dtype=base_attention_mask.dtype,
-                    device=base_attention_mask.device,
+                    (full_attention_mask.shape[0], 1),
+                    dtype=full_attention_mask.dtype,
+                    device=full_attention_mask.device,
                 ),
             ],
             dim=-1,
         )
         generation_kwargs = dict(static_kwargs)
-        step_position_ids = extend_position_ids(prefill_position_ids, len(generated))
+        step_position_ids = extend_position_ids(full_position_ids, len(generated))
         if step_position_ids is not None:
             generation_kwargs["position_ids"] = step_position_ids
-        if base_mm_types is not None:
+        if full_mm_types is not None:
             generation_kwargs["mm_token_type_ids"] = torch.cat(
                 [
-                    base_mm_types,
+                    full_mm_types,
                     torch.zeros(
-                        (base_mm_types.shape[0], len(generated)),
-                        dtype=base_mm_types.dtype,
-                        device=base_mm_types.device,
+                        (full_mm_types.shape[0], len(generated)),
+                        dtype=full_mm_types.dtype,
+                        device=full_mm_types.device,
                     ),
                 ],
                 dim=-1,
             )
         prepare_kwargs = {
             "past_key_values": past_key_values,
-            "attention_mask": attention_mask,
+            "attention_mask": full_attention_mask,
             "use_cache": True,
             "is_first_iteration": False,
             **generation_kwargs,
@@ -539,56 +802,19 @@ def greedy_generate_with_answer_attention(model, processor, inputs, max_new_toke
                 dtype=torch.long,
                 device=full_input_ids.device,
             )
-        prepared = model.prepare_inputs_for_generation(
-            full_input_ids,
-            **prepare_kwargs,
+        prepared = model.prepare_inputs_for_generation(full_input_ids, **prepare_kwargs)
+        validate_single_token_query(
+            prepared,
+            cache_sequence_length(past_key_values),
+            prompt_length + len(generated) - 1,
         )
-        query = prepared.get("input_ids")
-        query_embeds = prepared.get("inputs_embeds")
-        query_length = (
-            int(query.shape[1])
-            if query is not None
-            else int(query_embeds.shape[1])
-            if query_embeds is not None
-            else None
-        )
-        if query_length != 1:
-            raise RuntimeError(
-                "Cached attention probe did not reduce the decoder query to one token; "
-                f"got query_length={query_length}. Refusing a full QxK attention allocation."
-            )
-        for sequence_key in ("position_ids", "mm_token_type_ids"):
-            value = prepared.get(sequence_key)
-            if value is not None and value.shape[-1] != query_length:
-                prepared[sequence_key] = value[..., -query_length:].clone(
-                    memory_format=torch.contiguous_format
-                )
-        cache_length = cache_sequence_length(past_key_values)
-        expected_cache_length = prompt_length + len(generated) - 1
-        if cache_length is not None and cache_length != expected_cache_length:
-            raise RuntimeError(
-                "Cached attention probe found an unexpected KV-cache length before "
-                f"the decoder step: cache={cache_length}, expected={expected_cache_length}."
-            )
-        prepared_mask = prepared.get("attention_mask")
-        expected_mask_length = expected_cache_length + query_length
-        if prepared_mask is not None and prepared_mask.shape[-1] != expected_mask_length:
-            raise RuntimeError(
-                "Cached attention probe found an incompatible attention mask: "
-                f"mask={prepared_mask.shape[-1]}, expected={expected_mask_length}."
-            )
         prepared.update({
             "use_cache": True,
-            "output_attentions": True,
+            "output_attentions": False,
             "return_dict": True,
         })
         with torch.inference_mode():
             step_output = model_forward(model, prepared)
-        if not step_output.attentions or step_output.attentions[0] is None:
-            raise RuntimeError(
-                "Decoder attentions are unavailable. Run the probe with --attn_implementation eager."
-            )
-        attention_steps.append(step_output.attentions)
         past_key_values = step_output.past_key_values
         next_token = step_output.logits[:, -1, :].argmax(dim=-1, keepdim=True)
 
@@ -598,36 +824,35 @@ def greedy_generate_with_answer_attention(model, processor, inputs, max_new_toke
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )[0]
-    selected_step = None
-    for idx in range(min(len(generated), len(attention_steps))):
-        prefix_ids = torch.cat(generated[: idx + 1], dim=-1)
-        prefix = processor.batch_decode(
-            prefix_ids,
-            skip_special_tokens=True,
-            clean_up_tokenization_spaces=False,
-        )[0]
-        if parse_answer(prefix) != "UNKNOWN":
-            selected_step = idx
-            break
-    if selected_step is None:
-        selected_step = 0 if attention_steps else None
-    if selected_step is None:
-        raise RuntimeError("No generated non-EOS token was available for attention probing.")
-    selected_token_id = int(generated[selected_step][0, 0])
-    selected_token_text = processor.batch_decode(
-        generated[selected_step],
+    predicted_token_text = processor.batch_decode(
+        generated[0],
         skip_special_tokens=False,
         clean_up_tokenization_spaces=False,
     )[0]
-    return raw_response, attention_steps[selected_step], {
-        "selected_generation_step": selected_step,
-        "selected_token_id": selected_token_id,
-        "selected_token_text": selected_token_text,
+    query_token_id = int(inputs.input_ids[0, -1])
+    query_token_text = processor.batch_decode(
+        inputs.input_ids[:, -1:],
+        skip_special_tokens=False,
+        clean_up_tokenization_spaces=False,
+    )[0]
+    return raw_response, decision_output.attentions, {
+        "attention_semantics": "prompt_final_position_decision_query",
+        "query_token_id": query_token_id,
+        "query_token_text": query_token_text,
+        "predicted_first_token_id": decision_token_id,
+        "predicted_first_token_text": predicted_token_text,
+        "standard_first_token_id": standard_token_id,
+        "standard_first_token_match": first_token_match,
+        "standard_logits_max_abs_diff": logits_max_abs_diff,
+        "standard_logits_allclose": logits_allclose,
+        "standard_logits_parity_rtol": parity_rtol,
+        "standard_logits_parity_atol": parity_atol,
         "generated_token_ids": [int(token[0, 0]) for token in generated],
         "cache_api": cache_api,
         "prompt_length": prompt_length,
+        "prefix_cache_length": prefix_length,
         "prefill_position_ids_shape": (
-            list(prefill_position_ids.shape) if prefill_position_ids is not None else None
+            list(full_position_ids.shape) if full_position_ids is not None else None
         ),
     }
 
@@ -656,20 +881,38 @@ def probe_row(model, processor, row, args):
         return_tensors="pt",
     ).to(model.device)
     input_metadata = processor_input_metadata(inputs, video_inputs, video_kwargs)
-    raw_response, answer_attentions, query_metadata = greedy_generate_with_answer_attention(
+    raw_response, decision_attentions, query_metadata = greedy_generate_with_decision_attention(
         model,
         processor,
         inputs,
         args.max_new_tokens,
+        verify_standard_generation=args.verify_standard_generation,
+        require_standard_logits_match=args.require_standard_logits_match,
+        parity_rtol=args.parity_rtol,
+        parity_atol=args.parity_atol,
     )
+    prediction = parse_answer(raw_response)
+    archived_prediction = row.get("archived_prediction")
+    prediction_match = (
+        prediction == archived_prediction
+        if archived_prediction not in (None, "")
+        else None
+    )
+    if args.require_archived_prediction_match and prediction_match is False:
+        raise RuntimeError(
+            "Attention probe prediction differs from the archived main evaluation: "
+            f"probe={prediction}, archived={archived_prediction}, eval_id={row.get('eval_id')}."
+        )
     result = aggregate_attention(
         row,
         inputs,
         processor,
-        answer_attentions,
+        decision_attentions,
         video_path,
         video_kwargs,
         args.roi_padding,
+        args.roi_assignment,
+        args.roi_padding_sensitivity_values,
         args.visualization_layer,
         args.head_reduction,
     )
@@ -692,13 +935,18 @@ def probe_row(model, processor, row, args):
         "distractors": row.get("distractors") or [],
         "event_timing": row.get("event_timing") or {},
         "boundary_timing": row.get("boundary_timing") or {},
-        "prediction": parse_answer(raw_response),
-        "is_correct": parse_answer(raw_response) == row.get("correct_option"),
+        "prediction": prediction,
+        "is_correct": prediction == row.get("correct_option"),
+        "archived_prediction": archived_prediction,
+        "archived_is_correct": row.get("archived_is_correct"),
+        "prediction_match": prediction_match,
+        "attention_case_label": row.get("attention_case_label"),
         "raw_response": raw_response,
-        "answer_query": query_metadata,
+        "attention_semantics": query_metadata["attention_semantics"],
+        "decision_query": query_metadata,
         "input_metadata": input_metadata,
     })
-    del inputs, answer_attentions
+    del inputs, decision_attentions
     if args.empty_cache_each_sample and torch.cuda.is_available():
         torch.cuda.empty_cache()
     return result
@@ -706,6 +954,10 @@ def probe_row(model, processor, row, args):
 
 def parse_csv_filter(value):
     return {part.strip() for part in value.split(",") if part.strip()} if value else None
+
+
+def parse_int_csv(value):
+    return sorted({int(part.strip()) for part in value.split(",") if part.strip()})
 
 
 def filter_rows(rows, conditions, prompt_variants, base_sample_ids):
@@ -716,6 +968,59 @@ def filter_rows(rows, conditions, prompt_variants, base_sample_ids):
     if base_sample_ids:
         rows = [row for row in rows if int(row.get("base_sample_id")) in base_sample_ids]
     return rows
+
+
+def select_probe_rows(rows, max_samples):
+    if any(row.get("attention_case_label") for row in rows):
+        selected = []
+        grouped_cases = defaultdict(list)
+        for row in rows:
+            key = row.get("pairing_id") or row.get("video_id") or row.get("eval_id")
+            grouped_cases[key].append(row)
+        for group in grouped_cases.values():
+            if len(selected) + len(group) > max_samples:
+                break
+            selected.extend(group)
+        return selected
+    grouped = defaultdict(list)
+    for row in rows:
+        key = row.get("pairing_id") or row.get("video_id") or row.get("eval_id")
+        grouped[key].append(row)
+    condition_order = (
+        "low_boundary",
+        "temporal_boundary",
+        "visual_boundary",
+        "audio_boundary",
+    )
+    by_condition = defaultdict(list)
+    for group in grouped.values():
+        group.sort(key=lambda row: (row.get("prompt_variant") != "original", row.get("eval_id")))
+        condition = group[0].get("condition") or "other"
+        by_condition[condition].append(group)
+    for groups in by_condition.values():
+        groups.sort(key=lambda group: (str(group[0].get("base_sample_id")), group[0].get("eval_id")))
+
+    selected = []
+    condition_names = [name for name in condition_order if name in by_condition]
+    condition_names.extend(sorted(name for name in by_condition if name not in condition_names))
+    round_index = 0
+    while len(selected) < max_samples:
+        added = False
+        for condition in condition_names:
+            groups = by_condition[condition]
+            if round_index >= len(groups):
+                continue
+            group = groups[round_index]
+            if len(selected) + len(group) > max_samples:
+                continue
+            selected.extend(group)
+            added = True
+            if len(selected) >= max_samples:
+                break
+        if not added:
+            break
+        round_index += 1
+    return selected
 
 
 def main():
@@ -734,10 +1039,41 @@ def main():
     parser.add_argument("--prompt_variants", default=None)
     parser.add_argument("--base_sample_ids", default=None)
     parser.add_argument("--max_new_tokens", type=int, default=4)
+    parser.add_argument(
+        "--verify_standard_generation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Require the split-cache decision query to match standard greedy first-token generation.",
+    )
+    parser.add_argument(
+        "--require_standard_logits_match",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fail when split-cache and standard first-token logits exceed parity tolerances.",
+    )
+    parser.add_argument("--parity_rtol", type=float, default=1e-3)
+    parser.add_argument("--parity_atol", type=float, default=1e-3)
+    parser.add_argument(
+        "--require_archived_prediction_match",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fail when rows carrying archived_prediction disagree with the probe prediction.",
+    )
     parser.add_argument("--video_fps", type=float, default=None)
     parser.add_argument("--video_num_frames", type=int, default=None)
     parser.add_argument("--video_max_pixels", type=int, default=None)
     parser.add_argument("--roi_padding", type=int, default=8)
+    parser.add_argument(
+        "--roi_assignment",
+        choices=["overlap", "center"],
+        default="overlap",
+        help="Assign merged video cells by fractional ROI overlap or legacy center points.",
+    )
+    parser.add_argument(
+        "--roi_padding_sensitivity",
+        default="0,4,8,12",
+        help="Comma-separated padding values saved as selected-layer sensitivity profiles.",
+    )
     parser.add_argument("--visualization_layer", type=int, default=-1)
     parser.add_argument("--head_reduction", choices=["mean", "max"], default="mean")
     parser.add_argument("--max_overlay_frames", type=int, default=6)
@@ -751,6 +1087,17 @@ def main():
         parser.error("--max_samples and --max_new_tokens must be positive.")
     if args.roi_padding < 0:
         parser.error("--roi_padding must be non-negative.")
+    if args.parity_rtol < 0 or args.parity_atol < 0:
+        parser.error("Parity tolerances must be non-negative.")
+    try:
+        args.roi_padding_sensitivity_values = parse_int_csv(args.roi_padding_sensitivity)
+    except ValueError:
+        parser.error("--roi_padding_sensitivity must contain comma-separated integers.")
+    if any(value < 0 for value in args.roi_padding_sensitivity_values):
+        parser.error("ROI padding sensitivity values must be non-negative.")
+    if args.roi_padding not in args.roi_padding_sensitivity_values:
+        args.roi_padding_sensitivity_values.append(args.roi_padding)
+        args.roi_padding_sensitivity_values.sort()
     if not 0.0 <= args.heatmap_alpha <= 1.0:
         parser.error("--heatmap_alpha must be between 0 and 1.")
 
@@ -761,12 +1108,14 @@ def main():
         if args.base_sample_ids
         else None
     )
-    rows = filter_rows(
+    rows = select_probe_rows(filter_rows(
         read_jsonl(args.annotation_path),
         conditions,
         prompt_variants,
         base_sample_ids,
-    )[: args.max_samples]
+    ), args.max_samples)
+    if not rows:
+        raise ValueError("No complete mirrored attention cases matched the requested filters/limit.")
     configure_reproducibility(
         args.seed,
         deterministic=args.deterministic,
@@ -814,6 +1163,41 @@ def main():
             raise
 
     output_path.write_text(json.dumps(outputs, ensure_ascii=False, indent=2), encoding="utf-8")
+    archived_matches = [row.get("prediction_match") for row in outputs if row.get("prediction_match") is not None]
+    logit_differences = [
+        (row.get("decision_query") or {}).get("standard_logits_max_abs_diff")
+        for row in outputs
+    ]
+    logit_differences = [value for value in logit_differences if value is not None]
+    standard_token_matches = [
+        (row.get("decision_query") or {}).get("standard_first_token_match")
+        for row in outputs
+    ]
+    standard_token_matches = [value for value in standard_token_matches if value is not None]
+    standard_logits_matches = [
+        (row.get("decision_query") or {}).get("standard_logits_allclose")
+        for row in outputs
+    ]
+    standard_logits_matches = [value for value in standard_logits_matches if value is not None]
+    parity_summary = {
+        "attention_semantics": "prompt_final_position_attention_predicting_first_answer_token",
+        "rows": len(outputs),
+        "standard_first_token_rows": len(standard_token_matches),
+        "standard_first_token_matches": sum(int(value) for value in standard_token_matches),
+        "standard_logits_rows": len(standard_logits_matches),
+        "standard_logits_allclose": sum(int(value) for value in standard_logits_matches),
+        "maximum_standard_logits_absolute_difference": max(logit_differences, default=None),
+        "archived_prediction_rows": len(archived_matches),
+        "archived_prediction_matches": sum(int(value) for value in archived_matches),
+        "case_labels": dict(
+            Counter(row.get("attention_case_label") or "unlabelled" for row in outputs)
+        ),
+    }
+    summary_path = output_path.with_name(f"{output_path.stem}_summary.json")
+    summary_path.write_text(
+        json.dumps(parity_summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
     config_path = output_path.with_name(f"{output_path.stem}_config.json")
     config_payload = {
         **vars(args),
@@ -823,7 +1207,8 @@ def main():
             args.attn_implementation,
         ),
         "generation_cache_api": generation_cache_api(),
-        "attention_cache_strategy": "prefill_mrope_then_single_token_decode",
+        "attention_cache_strategy": "prefix_prefill_then_prompt_final_decision_query",
+        "attention_semantics": "prompt_final_position_attention_predicting_first_answer_token",
         "selected_eval_ids": [row.get("eval_id") for row in rows],
         "environment": environment_metadata(model),
     }
@@ -832,6 +1217,7 @@ def main():
         encoding="utf-8",
     )
     print(f"Wrote attention ROI probe results to {output_path}")
+    print(f"Wrote attention parity summary to {summary_path}")
 
     if args.plots:
         visualization_dir = (

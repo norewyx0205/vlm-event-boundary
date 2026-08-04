@@ -18,17 +18,24 @@ except ImportError:
 
 
 DEFAULT_PERTURBATIONS = (
-    "original,mask_target_1,mask_target_2,mask_distractors,remove_visual_marker"
+    "original,reencode_control,mask_target_1,mask_target_2,mask_distractors,"
+    "mask_background_control,remove_visual_marker,gap_removed,gap_shortened,gap_shifted"
 )
 PERTURBATION_ALIASES = {"mask_boundary": "remove_visual_marker"}
 VALID_PERTURBATIONS = {
     "original",
+    "reencode_control",
     "mask_target_1",
     "mask_target_2",
     "mask_targets",
     "mask_distractors",
+    "mask_background_control",
     "remove_visual_marker",
+    "gap_removed",
+    "gap_shortened",
+    "gap_shifted",
 }
+TEMPORAL_PERTURBATIONS = {"gap_removed", "gap_shortened", "gap_shifted"}
 
 
 def lerp(a, b, t):
@@ -136,16 +143,371 @@ def trajectory_mask(frame_shape, obj, padding):
     return mask
 
 
-def apply_object_mask(frame, obj, frame_idx, bg_color, padding, mask_mode, mask_scope):
+def object_mask(frame_shape, obj, frame_idx, padding, mask_mode, mask_scope):
     if not frame_in_scope(obj, frame_idx, mask_scope):
-        return 0
+        return np.zeros(frame_shape[:2], dtype=np.uint8)
     if mask_mode == "trajectory":
-        mask = trajectory_mask(frame.shape, obj, padding)
+        return trajectory_mask(frame_shape, obj, padding)
+    return shape_mask(frame_shape, obj, object_position(obj, frame_idx), padding)
+
+
+def union_object_masks(frame_shape, objects, frame_idx, padding, mask_mode, mask_scope):
+    union = np.zeros(frame_shape[:2], dtype=np.uint8)
+    for obj in objects:
+        union = cv2.bitwise_or(
+            union,
+            object_mask(frame_shape, obj, frame_idx, padding, mask_mode, mask_scope),
+        )
+    return union
+
+
+def object_bounding_radius(obj, padding=0):
+    radius = int(obj.get("radius") or 28)
+    if obj.get("shape") in {"square", "triangle"}:
+        radius = int(math.ceil(radius * math.sqrt(2)))
+    return radius + padding
+
+
+def sham_overlap_frames(candidate, occupied_objects, total_frames, padding, clearance):
+    candidate_radius = object_bounding_radius(candidate, padding)
+    overlaps = 0
+    for frame_idx in range(total_frames):
+        candidate_center = object_position(candidate, frame_idx)
+        for obj in occupied_objects:
+            center = object_position(obj, frame_idx)
+            if candidate_center is None or center is None:
+                continue
+            minimum_distance = (
+                candidate_radius
+                + object_bounding_radius(obj, padding)
+                + clearance
+            )
+            if (
+                (candidate_center[0] - center[0]) ** 2
+                + (candidate_center[1] - center[1]) ** 2
+                < minimum_distance**2
+            ):
+                overlaps += 1
+                break
+    return overlaps
+
+
+def place_background_sham(
+    reference,
+    occupied_objects,
+    total_frames,
+    width,
+    height,
+    padding,
+    clearance,
+    label,
+):
+    reference = dict(reference)
+    p0 = reference.get("from")
+    p1 = reference.get("to")
+    if p0 is None or p1 is None:
+        raise ValueError("Background sham reference must have an annotated trajectory.")
+    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+    margin = int(reference.get("radius") or 28) + padding + clearance
+    step = max(16, margin // 2)
+    candidates = []
+    for y in range(margin, height - margin + 1, step):
+        for x in range(margin, width - margin + 1, step):
+            end_x, end_y = x + dx, y + dy
+            if not (margin <= end_x <= width - margin and margin <= end_y <= height - margin):
+                continue
+            candidate = dict(reference)
+            candidate["from"] = [x, y]
+            candidate["to"] = [end_x, end_y]
+            overlap = sham_overlap_frames(
+                candidate,
+                occupied_objects,
+                total_frames,
+                padding,
+                clearance,
+            )
+            candidates.append((overlap, y, x, candidate))
+    if not candidates:
+        raise RuntimeError("Could not place a background sham trajectory inside the frame.")
+    overlap, _, _, candidate = min(candidates, key=lambda item: item[:3])
+    if overlap:
+        raise RuntimeError(
+            "Could not place a non-overlapping background sham trajectory; "
+            f"minimum overlap was {overlap} frames."
+        )
+    candidate["id"] = f"background_control_{label}"
+    candidate["reference_source"] = label
+    return candidate
+
+
+def background_sham_objects(row, width, height, reference_name, padding, clearance):
+    targets = sorted(row.get("target_objects") or [], key=lambda item: item["id"])
+    distractors = [timed_distractor(row, item) for item in row.get("distractors") or []]
+    occupied_objects = targets + distractors
+    total_frames = int(row.get("total_frames") or 1)
+
+    if reference_name == "distractors":
+        references = sorted(
+            [(item, f"distractor_{item.get('id')}") for item in distractors],
+            key=lambda pair: -(int(pair[0].get("radius") or 28)),
+        )
     else:
-        mask = shape_mask(frame.shape, obj, object_position(obj, frame_idx), padding)
-    changed = int(np.count_nonzero(mask))
-    frame[mask > 0] = bg_color
-    return changed
+        reference_index = 1 if reference_name == "target_2" and len(targets) > 1 else 0
+        references = [(targets[reference_index], reference_name)]
+
+    shams = []
+    for reference, label in references:
+        sham = place_background_sham(
+            reference,
+            occupied_objects,
+            total_frames,
+            width,
+            height,
+            padding,
+            clearance,
+            label,
+        )
+        shams.append(sham)
+        occupied_objects.append(sham)
+    return shams
+
+
+def translate_mask(mask, offset):
+    dx, dy = offset
+    matrix = np.asarray([[1, 0, dx], [0, 1, dy]], dtype=np.float32)
+    return cv2.warpAffine(
+        mask,
+        matrix,
+        (mask.shape[1], mask.shape[0]),
+        flags=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+
+
+def choose_background_sham_offset(
+    frame_shape,
+    row,
+    reference_objects,
+    occupied_objects,
+    padding,
+    mask_mode,
+    mask_scope,
+    clearance,
+):
+    height, width = frame_shape[:2]
+    offsets = [
+        (dx, dy)
+        for dy in (-192, -128, -64, 0, 64, 128, 192)
+        for dx in (-192, -128, -64, 0, 64, 128, 192)
+        if (dx, dy) != (0, 0)
+    ]
+    total_frames = int(row.get("total_frames") or 1)
+    sampled_frames = sorted(set(range(0, total_frames, max(1, total_frames // 18))) | {total_frames - 1})
+    def build_frame_masks(frame_indices):
+        masks = []
+        centroids = []
+        for frame_idx in frame_indices:
+            reference_mask = union_object_masks(
+                frame_shape,
+                reference_objects,
+                frame_idx,
+                padding,
+                mask_mode,
+                mask_scope,
+            )
+            occupied = union_object_masks(
+                frame_shape,
+                occupied_objects,
+                frame_idx,
+                padding + clearance,
+                "dynamic",
+                "all_frames",
+            )
+            masks.append((reference_mask, occupied))
+            centroids.append(mask_centroid(reference_mask))
+        return masks, centroid_path_length(centroids)
+
+    def score_offset(offset, frame_masks, reference_path_length):
+        sham_centroids = []
+        repair_pixels = 0
+        for reference_mask, occupied in frame_masks:
+            shifted = translate_mask(reference_mask, offset)
+            retained = np.where((shifted > 0) & (occupied == 0), 255, 0).astype(np.uint8)
+            repair_pixels += int(np.count_nonzero(reference_mask)) - int(np.count_nonzero(retained))
+            sham = area_matched_background_mask(reference_mask, occupied, offset)
+            sham_centroids.append(mask_centroid(sham))
+        sham_path_length = centroid_path_length(sham_centroids)
+        relative_path_difference = abs(sham_path_length - reference_path_length) / max(
+            reference_path_length, 1.0
+        )
+        return (
+            relative_path_difference,
+            repair_pixels,
+            abs(offset[0]) + abs(offset[1]),
+            offset,
+        )
+
+    coarse_masks, coarse_reference_path = build_frame_masks(sampled_frames)
+    coarse_scores = sorted(
+        score_offset(offset, coarse_masks, coarse_reference_path) for offset in offsets
+    )
+
+    # Re-rank a small candidate set on denser temporal sampling. Short reference
+    # trajectories are especially sensitive to sparse-frame approximation.
+    dense_frames = sorted(
+        set(range(0, total_frames, max(1, total_frames // 54))) | {total_frames - 1}
+    )
+    dense_masks, dense_reference_path = build_frame_masks(dense_frames)
+    dense_scores = [
+        score_offset(score[3], dense_masks, dense_reference_path)
+        for score in coarse_scores[:6]
+    ]
+    return min(dense_scores)[3]
+
+
+def area_matched_background_mask(reference_mask, occupied_mask, offset):
+    desired_area = int(np.count_nonzero(reference_mask))
+    if desired_area == 0:
+        return np.zeros_like(reference_mask)
+    reference_center = mask_centroid(reference_mask)
+    if reference_center is None:
+        return np.zeros_like(reference_mask)
+    center_x = reference_center[0] + offset[0]
+    center_y = reference_center[1] + offset[1]
+    yy, xx = np.ogrid[: reference_mask.shape[0], : reference_mask.shape[1]]
+    distance = (xx - center_x) ** 2 + (yy - center_y) ** 2
+    available = occupied_mask == 0
+    candidates = np.flatnonzero(available)
+    if len(candidates) < desired_area:
+        raise RuntimeError(
+            f"Background sham needs {desired_area} pixels but only {len(candidates)} are free."
+        )
+    candidate_distances = distance.reshape(-1)[candidates]
+    selected = candidates[
+        np.argpartition(candidate_distances, desired_area - 1)[:desired_area]
+    ]
+    sham = np.zeros_like(reference_mask)
+    sham.reshape(-1)[selected] = 255
+    return sham
+
+
+def mask_centroid(mask):
+    moments = cv2.moments(mask, binaryImage=True)
+    if not moments["m00"]:
+        return None
+    return moments["m10"] / moments["m00"], moments["m01"] / moments["m00"]
+
+
+def centroid_path_length(centroids):
+    points = [point for point in centroids if point is not None]
+    return sum(
+        math.hypot(second[0] - first[0], second[1] - first[1])
+        for first, second in zip(points, points[1:])
+    )
+
+
+def shift_value_after_gap(value, gap_end, amount):
+    if value is None:
+        return None
+    return int(value) - amount if int(value) >= gap_end else int(value)
+
+
+def temporal_intervention(row, perturbation_type, total_frames, fps, shortened_sec):
+    event = dict(row.get("event_timing") or {})
+    boundary = dict(row.get("boundary_timing") or {})
+    gap_start = int(boundary.get("boundary_start_frame") or 0)
+    gap_end = int(boundary.get("boundary_end_frame") or gap_start)
+    gap_frames = gap_end - gap_start
+    if gap_frames <= 0:
+        raise ValueError(f"{perturbation_type} requires a positive temporal gap.")
+    if int(row.get("total_frames") or total_frames) != total_frames:
+        raise ValueError("Decoded frame count differs from annotation total_frames.")
+    if boundary.get("audio_marker") not in (None, "", "none"):
+        raise ValueError("Temporal-gap interventions do not support an audio marker in the moved interval.")
+
+    timed_objects = [timed_distractor(row, item) for item in row.get("distractors") or []]
+    for obj in list(row.get("target_objects") or []) + timed_objects:
+        window = motion_window(obj)
+        if window and max(window[0], gap_start) < min(window[1], gap_end):
+            raise ValueError(
+                f"{perturbation_type} would remove active motion for object {obj.get('id')}; "
+                "use stimuli with a stationary inter-event gap."
+            )
+
+    first_start = int(event["first_event_start_frame"])
+    if perturbation_type == "gap_shifted":
+        plan = (
+            list(range(first_start))
+            + [first_start] * gap_frames
+            + list(range(first_start, gap_start))
+            + list(range(gap_end, total_frames))
+        )
+        event["first_event_start_frame"] += gap_frames
+        event["first_event_end_frame"] += gap_frames
+        boundary.update({
+            "boundary_start_frame": first_start,
+            "boundary_end_frame": first_start + gap_frames,
+            "gap_frames": gap_frames,
+            "temporal_gap_location": "before_first_event",
+        })
+        target_updates = []
+        for target in row.get("target_objects") or []:
+            updated = dict(target)
+            if int(updated.get("start_frame") or 0) < gap_start:
+                updated["start_frame"] = int(updated["start_frame"]) + gap_frames
+                updated["end_frame"] = int(updated["end_frame"]) + gap_frames
+            target_updates.append(updated)
+        moved_frames = 0
+    else:
+        retained_gap = 0
+        if perturbation_type == "gap_shortened":
+            retained_gap = min(gap_frames - 1, max(1, int(round(shortened_sec * fps))))
+        moved_frames = gap_frames - retained_gap
+        plan = (
+            list(range(gap_start + retained_gap))
+            + list(range(gap_end, total_frames))
+            + [total_frames - 1] * moved_frames
+        )
+        event["second_event_start_frame"] -= moved_frames
+        event["second_event_end_frame"] -= moved_frames
+        for key in ("unrelated_event_start_frame", "unrelated_event_end_frame"):
+            event[key] = shift_value_after_gap(event.get(key), gap_end, moved_frames)
+        boundary.update({
+            "boundary_start_frame": gap_start,
+            "boundary_end_frame": gap_start + retained_gap,
+            "gap_frames": retained_gap,
+            "temporal_gap_location": "between_events" if retained_gap else "removed",
+        })
+        target_updates = []
+        for target in row.get("target_objects") or []:
+            updated = dict(target)
+            updated["start_frame"] = shift_value_after_gap(
+                updated.get("start_frame"), gap_end, moved_frames
+            )
+            updated["end_frame"] = shift_value_after_gap(
+                updated.get("end_frame"), gap_end, moved_frames
+            )
+            target_updates.append(updated)
+
+    if len(plan) != total_frames:
+        raise RuntimeError(
+            f"Temporal intervention produced {len(plan)} frames; expected {total_frames}."
+        )
+    updates = {
+        "event_timing": event,
+        "boundary_timing": boundary,
+        "target_objects": target_updates,
+        "temporal_intervention": {
+            "type": perturbation_type,
+            "original_gap_frames": gap_frames,
+            "realized_gap_frames": int(boundary["gap_frames"]),
+            "moved_frames": moved_frames,
+            "total_frames_preserved": True,
+            "frame_map": "stored_in_perturbation_stats",
+        },
+    }
+    return plan, updates
 
 
 def estimate_background(frame, fixed_value=None, sample_width=16):
@@ -210,7 +572,7 @@ def visual_marker_window(row, padding_frames):
 
 def perturbation_applicable(row, perturbation_type):
     targets = row.get("target_objects") or []
-    if perturbation_type == "original":
+    if perturbation_type in {"original", "reencode_control"}:
         return True
     if perturbation_type == "mask_target_1":
         return len(targets) >= 1
@@ -220,8 +582,16 @@ def perturbation_applicable(row, perturbation_type):
         return bool(targets)
     if perturbation_type == "mask_distractors":
         return bool(row.get("distractors"))
+    if perturbation_type == "mask_background_control":
+        return bool(targets)
     if perturbation_type == "remove_visual_marker":
         return visual_marker_window(row, 0) is not None
+    if perturbation_type in TEMPORAL_PERTURBATIONS:
+        timing = row.get("boundary_timing") or {}
+        return (
+            row.get("condition") == "temporal_boundary"
+            and int(timing.get("gap_frames") or 0) > 0
+        )
     return False
 
 
@@ -248,6 +618,44 @@ def mux_source_audio(video_only_path, source_path, output_path):
     subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def decoded_video_difference(source_path, comparison_path):
+    source = cv2.VideoCapture(str(source_path))
+    comparison = cv2.VideoCapture(str(comparison_path))
+    if not source.isOpened() or not comparison.isOpened():
+        source.release()
+        comparison.release()
+        raise RuntimeError("Could not decode source/re-encoded videos for codec metrics.")
+    width = int(source.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(source.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    squared_error = 0.0
+    absolute_error = 0.0
+    channel_values = 0
+    changed_pixels = 0
+    frames = 0
+    while True:
+        source_ok, source_frame = source.read()
+        comparison_ok, comparison_frame = comparison.read()
+        if not source_ok or not comparison_ok:
+            break
+        difference = source_frame.astype(np.float32) - comparison_frame.astype(np.float32)
+        squared_error += float(np.square(difference).sum())
+        absolute_error += float(np.abs(difference).sum())
+        channel_values += int(difference.size)
+        changed_pixels += int(np.count_nonzero(np.any(difference != 0, axis=2)))
+        frames += 1
+    source.release()
+    comparison.release()
+    mse = squared_error / max(1, channel_values)
+    return {
+        "compared_frames": frames,
+        "mean_absolute_channel_error": absolute_error / max(1, channel_values),
+        "mean_squared_channel_error": mse,
+        "psnr_db": 10 * math.log10((255.0**2) / mse) if mse else None,
+        "decoded_changed_pixel_fraction": changed_pixels
+        / max(1, frames * width * height),
+    }
+
+
 def perturb_video(source_path, output_path, row, perturbation_type, args):
     cap = cv2.VideoCapture(str(source_path))
     if not cap.isOpened():
@@ -256,6 +664,26 @@ def perturb_video(source_path, output_path, row, perturbation_type, args):
     fps = cap.get(cv2.CAP_PROP_FPS) or row.get("fps") or 15
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    decoded_frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    temporal_updates = {}
+    frame_plan = None
+    source_frames = None
+    if perturbation_type in TEMPORAL_PERTURBATIONS:
+        source_frames = []
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            source_frames.append(frame)
+        cap.release()
+        decoded_frame_count = len(source_frames)
+        frame_plan, temporal_updates = temporal_intervention(
+            row,
+            perturbation_type,
+            decoded_frame_count,
+            fps,
+            args.gap_shortened_sec,
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     video_only_path = output_path.with_name(f"{output_path.stem}_video_only{output_path.suffix}")
     writer = cv2.VideoWriter(
@@ -268,65 +696,135 @@ def perturb_video(source_path, output_path, row, perturbation_type, args):
         cap.release()
         raise RuntimeError(f"Could not open output video writer: {video_only_path}")
 
-    targets = sorted(row.get("target_objects") or [], key=lambda item: item["id"])
+    effective_row = {**row, **temporal_updates}
+    targets = sorted(effective_row.get("target_objects") or [], key=lambda item: item["id"])
     distractors = [timed_distractor(row, item) for item in row.get("distractors") or []]
     marker_window = visual_marker_window(row, args.boundary_padding_frames)
-    affected_frames = 0
-    affected_pixels = 0
+    sham_objects = []
+    sham_offset = None
+    if perturbation_type == "mask_background_control":
+        if args.sham_reference == "distractors":
+            sham_offset = choose_background_sham_offset(
+                (height, width, 3),
+                row,
+                distractors,
+                targets + distractors,
+                args.mask_padding,
+                args.mask_mode,
+                args.mask_scope,
+                args.sham_clearance,
+            )
+        else:
+            sham_objects = background_sham_objects(
+                row,
+                width,
+                height,
+                args.sham_reference,
+                args.mask_padding,
+                args.sham_clearance,
+            )
+    mask_assignment_frames = 0
+    masked_pixel_assignments = 0
+    changed_frames = 0
+    changed_pixels = 0
+    sham_reference_centroids = []
+    sham_centroids = []
+    sham_area_matches = []
     frame_idx = 0
     bg_color = None
 
     while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
+        if frame_plan is not None:
+            if frame_idx >= len(frame_plan):
+                break
+            source_idx = frame_plan[frame_idx]
+            frame = source_frames[source_idx].copy()
+            comparison_frame = source_frames[frame_idx]
+        else:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            source_idx = frame_idx
+            comparison_frame = frame.copy()
         if bg_color is None:
             bg_color = estimate_background(frame, args.background_value)
 
-        frame_changed_pixels = 0
+        assignment_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
         marker_is_visible = (
             marker_window is not None
             and marker_window[0] <= frame_idx < marker_window[1]
         )
         protect_marker = args.protect_visual_marker and marker_is_visible
         if perturbation_type == "mask_target_1" and targets and not protect_marker:
-            frame_changed_pixels += apply_object_mask(
-                frame,
-                targets[0],
+            assignment_mask = union_object_masks(
+                frame.shape,
+                [targets[0]],
                 frame_idx,
-                bg_color,
                 args.mask_padding,
                 args.mask_mode,
                 args.mask_scope,
             )
         elif perturbation_type == "mask_target_2" and len(targets) > 1 and not protect_marker:
-            frame_changed_pixels += apply_object_mask(
-                frame,
-                targets[1],
+            assignment_mask = union_object_masks(
+                frame.shape,
+                [targets[1]],
                 frame_idx,
-                bg_color,
                 args.mask_padding,
                 args.mask_mode,
                 args.mask_scope,
             )
         elif perturbation_type == "mask_targets" and not protect_marker:
-            for target in targets:
-                frame_changed_pixels += apply_object_mask(
-                    frame,
-                    target,
+            assignment_mask = union_object_masks(
+                frame.shape,
+                targets,
+                frame_idx,
+                args.mask_padding,
+                args.mask_mode,
+                args.mask_scope,
+            )
+        elif perturbation_type == "mask_distractors" and not protect_marker:
+            assignment_mask = union_object_masks(
+                frame.shape,
+                distractors,
+                frame_idx,
+                args.mask_padding,
+                args.mask_mode,
+                args.mask_scope,
+            )
+        elif perturbation_type == "mask_background_control" and not protect_marker:
+            if args.sham_reference == "distractors":
+                reference_mask = union_object_masks(
+                    frame.shape,
+                    distractors,
                     frame_idx,
-                    bg_color,
                     args.mask_padding,
                     args.mask_mode,
                     args.mask_scope,
                 )
-        elif perturbation_type == "mask_distractors" and not protect_marker:
-            for distractor in distractors:
-                frame_changed_pixels += apply_object_mask(
-                    frame,
-                    distractor,
+                occupied_mask = union_object_masks(
+                    frame.shape,
+                    targets + distractors,
                     frame_idx,
-                    bg_color,
+                    args.mask_padding + args.sham_clearance,
+                    "dynamic",
+                    "all_frames",
+                )
+                assignment_mask = area_matched_background_mask(
+                    reference_mask,
+                    occupied_mask,
+                    sham_offset,
+                )
+                sham_reference_centroids.append(mask_centroid(reference_mask))
+                sham_centroids.append(mask_centroid(assignment_mask))
+                sham_area_matches.append(
+                    int(np.count_nonzero(reference_mask))
+                    == int(np.count_nonzero(assignment_mask))
+                )
+            else:
+                assignment_mask = union_object_masks(
+                    frame.shape,
+                    sham_objects,
+                    frame_idx,
                     args.mask_padding,
                     args.mask_mode,
                     args.mask_scope,
@@ -336,7 +834,7 @@ def perturb_video(source_path, output_path, row, perturbation_type, args):
             and marker_window is not None
             and marker_window[0] <= frame_idx < marker_window[1]
         ):
-            frame_changed_pixels += reconstruct_scene(
+            reconstruct_scene(
                 frame,
                 row,
                 frame_idx,
@@ -345,13 +843,19 @@ def perturb_video(source_path, output_path, row, perturbation_type, args):
                 distractors,
             )
 
+        if np.any(assignment_mask):
+            mask_assignment_frames += 1
+            masked_pixel_assignments += int(np.count_nonzero(assignment_mask))
+            frame[assignment_mask > 0] = bg_color
+        frame_changed_pixels = int(np.count_nonzero(np.any(frame != comparison_frame, axis=2)))
         if frame_changed_pixels:
-            affected_frames += 1
-            affected_pixels += frame_changed_pixels
+            changed_frames += 1
+            changed_pixels += frame_changed_pixels
         writer.write(frame)
         frame_idx += 1
 
-    cap.release()
+    if cap.isOpened():
+        cap.release()
     writer.release()
     if args.preserve_audio:
         mux_source_audio(video_only_path, source_path, output_path)
@@ -359,16 +863,60 @@ def perturb_video(source_path, output_path, row, perturbation_type, args):
     else:
         video_only_path.replace(output_path)
 
+    sham_reference_path_length = centroid_path_length(sham_reference_centroids)
+    sham_path_length = centroid_path_length(sham_centroids)
+    sham_path_relative_error = None
+    if sham_reference_centroids:
+        sham_path_relative_error = abs(sham_path_length - sham_reference_path_length) / max(
+            sham_reference_path_length, 1.0
+        )
+        if sham_path_relative_error > args.sham_max_path_relative_error:
+            output_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                "Background sham trajectory mismatch: "
+                f"relative path-length error {sham_path_relative_error:.3f} exceeds "
+                f"--sham_max_path_relative_error={args.sham_max_path_relative_error:.3f}."
+            )
+
     total_pixels = max(1, frame_idx * width * height)
-    return {
+    stats = {
         "source_frames": frame_idx,
-        "affected_frames": affected_frames,
-        "affected_frame_fraction": affected_frames / max(1, frame_idx),
-        "affected_pixels": affected_pixels,
-        "affected_pixel_fraction": affected_pixels / total_pixels,
+        "output_frames": frame_idx,
+        "mask_assignment_frames": mask_assignment_frames,
+        "mask_assignment_frame_fraction": mask_assignment_frames / max(1, frame_idx),
+        "masked_pixel_assignments": masked_pixel_assignments,
+        "masked_pixel_assignment_fraction": masked_pixel_assignments / total_pixels,
+        "changed_frames": changed_frames,
+        "changed_frame_fraction": changed_frames / max(1, frame_idx),
+        "changed_pixels": changed_pixels,
+        "changed_pixel_fraction": changed_pixels / total_pixels,
+        "affected_frames": changed_frames,
+        "affected_frame_fraction": changed_frames / max(1, frame_idx),
+        "affected_pixels": changed_pixels,
+        "affected_pixel_fraction": changed_pixels / total_pixels,
         "background_color_bgr": list(bg_color or ()),
         "audio_preserved": bool(args.preserve_audio),
+        "codec_pipeline_applied": True,
+        "source_frame_indices": frame_plan,
+        "background_sham_objects": sham_objects,
+        "background_sham_offset": list(sham_offset) if sham_offset is not None else None,
+        "background_sham_area_match_rate": (
+            sum(int(value) for value in sham_area_matches) / len(sham_area_matches)
+            if sham_area_matches
+            else None
+        ),
+        "background_sham_reference_centroid_path_length": sham_reference_path_length,
+        "background_sham_centroid_path_length": sham_path_length,
+        "background_sham_path_length_relative_error": sham_path_relative_error,
+        "background_sham_path_match_within_tolerance": (
+            sham_path_relative_error <= args.sham_max_path_relative_error
+            if sham_path_relative_error is not None
+            else None
+        ),
     }
+    if perturbation_type == "reencode_control" and args.measure_codec_effect:
+        stats["codec_effect"] = decoded_video_difference(source_path, output_path)
+    return stats, temporal_updates
 
 
 def relative_or_absolute(path):
@@ -437,16 +985,29 @@ def main():
     parser.add_argument("--mask_padding", type=int, default=6)
     parser.add_argument("--mask_mode", choices=["dynamic", "trajectory"], default="dynamic")
     parser.add_argument("--mask_scope", choices=["all_frames", "motion_window"], default="all_frames")
+    parser.add_argument(
+        "--sham_reference",
+        choices=["distractors", "target_1", "target_2"],
+        default="distractors",
+    )
+    parser.add_argument("--sham_clearance", type=int, default=8)
+    parser.add_argument("--sham_max_path_relative_error", type=float, default=0.10)
+    parser.add_argument("--gap_shortened_sec", type=float, default=1.0)
     parser.add_argument("--boundary_padding_frames", type=int, default=0)
     parser.add_argument("--background_value", type=int, default=None)
     parser.add_argument("--protect_visual_marker", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--preserve_audio", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--measure_codec_effect", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--keep_inapplicable", action="store_true")
     args = parser.parse_args()
     if args.max_base_samples is not None and args.max_videos is not None:
         parser.error("Use only one limit: --max_base_samples or --max_videos.")
-    if args.mask_padding < 0 or args.boundary_padding_frames < 0:
+    if args.mask_padding < 0 or args.boundary_padding_frames < 0 or args.sham_clearance < 0:
         parser.error("Mask padding values must be non-negative.")
+    if args.gap_shortened_sec <= 0:
+        parser.error("--gap_shortened_sec must be positive.")
+    if args.sham_max_path_relative_error < 0:
+        parser.error("--sham_max_path_relative_error must be non-negative.")
     if args.background_value is not None and not 0 <= args.background_value <= 255:
         parser.error("--background_value must be between 0 and 255.")
 
@@ -475,10 +1036,15 @@ def main():
         "mask_padding": args.mask_padding,
         "mask_mode": args.mask_mode,
         "mask_scope": args.mask_scope,
+        "sham_reference": args.sham_reference,
+        "sham_clearance": args.sham_clearance,
+        "sham_max_path_relative_error": args.sham_max_path_relative_error,
+        "gap_shortened_sec": args.gap_shortened_sec,
         "boundary_padding_frames": args.boundary_padding_frames,
         "background_value": args.background_value,
         "protect_visual_marker": args.protect_visual_marker,
         "preserve_audio": args.preserve_audio,
+        "measure_codec_effect": args.measure_codec_effect,
     }
 
     for source_row, eval_rows in paired_rows(rows):
@@ -492,24 +1058,48 @@ def main():
 
         for perturbation_type in perturbations:
             applicable = perturbation_applicable(source_row, perturbation_type)
+            if (
+                perturbation_type == "mask_background_control"
+                and args.sham_reference == "distractors"
+            ):
+                applicable = bool(source_row.get("distractors"))
             if not applicable and not args.keep_inapplicable:
                 skipped_inapplicable[perturbation_type] += 1
                 continue
 
             stats = {
                 "source_frames": int(source_row.get("total_frames") or 0),
+                "output_frames": int(source_row.get("total_frames") or 0),
+                "mask_assignment_frames": 0,
+                "mask_assignment_frame_fraction": 0.0,
+                "masked_pixel_assignments": 0,
+                "masked_pixel_assignment_fraction": 0.0,
+                "changed_frames": 0,
+                "changed_frame_fraction": 0.0,
+                "changed_pixels": 0,
+                "changed_pixel_fraction": 0.0,
                 "affected_frames": 0,
                 "affected_frame_fraction": 0.0,
                 "affected_pixels": 0,
                 "affected_pixel_fraction": 0.0,
                 "background_color_bgr": [],
                 "audio_preserved": True,
+                "codec_pipeline_applied": False,
+                "source_frame_indices": None,
+                "background_sham_objects": [],
+                "background_sham_offset": None,
+                "background_sham_area_match_rate": None,
+                "background_sham_reference_centroid_path_length": 0.0,
+                "background_sham_centroid_path_length": 0.0,
+                "background_sham_path_length_relative_error": None,
+                "background_sham_path_match_within_tolerance": None,
             }
+            metadata_updates = {}
             if perturbation_type == "original":
                 output_video = source_video
             else:
                 output_video = video_root / perturbation_type / source_row["video_id"]
-                stats = perturb_video(
+                stats, metadata_updates = perturb_video(
                     source_video,
                     output_video,
                     source_row,
@@ -528,7 +1118,10 @@ def main():
             intervention_stats.append(stat_row)
             for row in eval_rows:
                 output_row = dict(row)
+                output_row.update(metadata_updates)
                 output_row["eval_id"] = f"{row['eval_id']}_roi_{perturbation_type}"
+                output_row["source_eval_id"] = row["eval_id"]
+                output_row["source_pairing_id"] = row.get("pairing_id")
                 output_row["source_video_id"] = source_row["video_id"]
                 output_row["source_video_path"] = source_row["video_path"]
                 output_row["video_path"] = relative_or_absolute(output_video)

@@ -89,6 +89,26 @@ def split_label(label, max_length=18):
     return [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
 
 
+def attention_result_subtitle(result):
+    sample_id = result.get("base_sample_id") or result.get("video_id") or "sample"
+    if isinstance(sample_id, int) or str(sample_id).isdigit():
+        sample_id = f"Sample {int(sample_id):03d}"
+    condition = str(result.get("condition") or result.get("boundary_type") or "").replace("_", " ")
+    variant = str(result.get("prompt_variant") or "").replace("_", " ")
+    return " | ".join(part for part in (str(sample_id), condition.title(), variant.title()) if part)
+
+
+def attention_semantic_label(result):
+    semantics = str(
+        result.get("attention_semantics")
+        or (result.get("decision_query") or {}).get("attention_semantics")
+        or ""
+    )
+    if "decision" in semantics or result.get("decision_query"):
+        return "Decision-position"
+    return "Generated-answer-token"
+
+
 def choose_temporal_indices(result, max_frames):
     attention = np.asarray(result.get("temporal_attention") or [], dtype=np.float32)
     phases = result.get("temporal_phases") or []
@@ -133,11 +153,11 @@ def write_attention_overlay(result, output_path, project_root=None, max_frames=6
     positive = maps[maps > 0]
     scale_ceiling = float(np.percentile(positive, 99)) if positive.size else 1.0
     cell_w, cell_h = 250, 250
-    label_h, title_h = 62, 62
+    label_h, title_h = 62, 82
     width = cell_w * len(indices)
     image = np.full((title_h + cell_h + label_h, width, 3), 255, dtype=np.uint8)
-    title = f"Answer-token attention over sampled video frames: {result.get('eval_id', '')}"
-    centered_text(image, title, width // 2, 36, scale=0.65, thickness=2)
+    centered_text(image, f"{attention_semantic_label(result)} attention over sampled video frames", width // 2, 30, scale=0.65, thickness=2)
+    centered_text(image, attention_result_subtitle(result), width // 2, 57, scale=0.44, color=(75, 75, 75))
 
     phases = result.get("temporal_phases") or []
     temporal_attention = result.get("temporal_attention") or []
@@ -186,17 +206,18 @@ def write_temporal_attention(result, output_path):
     if values.size == 0:
         return False
     width, height = 1200, 570
-    left, right, top, bottom = 95, 55, 85, 95
+    left, right, top, bottom = 95, 55, 102, 95
     plot_w, plot_h = width - left - right, height - top - bottom
     image = np.full((height, width, 3), 255, dtype=np.uint8)
     centered_text(
         image,
-        f"Temporal attention profile: {result.get('eval_id', '')}",
+        f"{attention_semantic_label(result)} temporal attention profile",
         width // 2,
-        42,
+        32,
         scale=0.72,
         thickness=2,
     )
+    centered_text(image, attention_result_subtitle(result), width // 2, 59, scale=0.44, color=(75, 75, 75))
 
     for start, end, phase in phase_runs(phases):
         x1 = left + round(start / max(1, len(values)) * plot_w)
@@ -280,17 +301,25 @@ def write_layer_roi_heatmap(result, output_path):
 
     cell_w = max(120, min(170, 760 // max(1, len(rois))))
     cell_h = max(14, min(25, 520 // max(1, len(profiles))))
-    left, right, top, bottom = 115, 135, 90, 125
+    left, right, top, bottom = 115, 135, 108, 125
     width = left + cell_w * len(rois) + right
     height = top + cell_h * len(profiles) + bottom
     image = np.full((height, width, 3), 255, dtype=np.uint8)
     centered_text(
         image,
-        f"Layer-wise ROI attention enrichment: {result.get('eval_id', '')}",
+        "Layer-wise ROI attention enrichment",
         width // 2,
-        42,
+        34,
         scale=0.66,
         thickness=2,
+    )
+    centered_text(
+        image,
+        attention_result_subtitle(result),
+        width // 2,
+        61,
+        scale=0.44,
+        color=(75, 75, 75),
     )
 
     heat = cv2.resize(heat, (cell_w * len(rois), cell_h * len(profiles)), interpolation=cv2.INTER_NEAREST)
@@ -327,6 +356,68 @@ def write_layer_roi_heatmap(result, output_path):
     return True
 
 
+def write_padding_sensitivity(result, output_path):
+    output_path = Path(output_path)
+    profiles = result.get("roi_padding_sensitivity") or {}
+    if len(profiles) < 2:
+        return False
+    paddings = sorted(int(value) for value in profiles)
+    present = {
+        roi
+        for profile in profiles.values()
+        for roi in profile
+        if roi in ROI_LABELS and roi != "background"
+    }
+    rois = [roi for roi in ROI_ORDER if roi in present]
+    if not rois:
+        return False
+
+    width, height = 1100, 650
+    left, right, top, bottom = 90, 245, 105, 100
+    plot_w, plot_h = width - left - right, height - top - bottom
+    image = np.full((height, width, 3), 255, dtype=np.uint8)
+    centered_text(image, "ROI-padding sensitivity of attention enrichment", width // 2, 32, scale=0.68, thickness=2)
+    centered_text(image, attention_result_subtitle(result), width // 2, 59, scale=0.44, color=(75, 75, 75))
+
+    values = [
+        float((profiles[str(padding)].get(roi) or {}).get("enrichment") or 0.0)
+        for padding in paddings
+        for roi in rois
+    ]
+    maximum = max(1.0, min(4.0, max(values, default=1.0) * 1.12))
+    for fraction in np.linspace(0.0, 1.0, 5):
+        y = top + plot_h - round(float(fraction) * plot_h)
+        cv2.line(image, (left, y), (left + plot_w, y), (225, 225, 225), 1)
+        cv2.putText(image, f"{maximum * fraction:.1f}x", (22, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (55, 55, 55), 1, cv2.LINE_AA)
+    cv2.line(image, (left, top), (left, top + plot_h), (45, 45, 45), 2)
+    cv2.line(image, (left, top + plot_h), (left + plot_w, top + plot_h), (45, 45, 45), 2)
+
+    colors = [(44, 160, 44), (214, 120, 28), (50, 60, 210), (155, 80, 170), (50, 150, 170)]
+    for roi_index, roi in enumerate(rois):
+        points = []
+        color = colors[roi_index % len(colors)]
+        for padding_index, padding in enumerate(paddings):
+            value = float((profiles[str(padding)].get(roi) or {}).get("enrichment") or 0.0)
+            x = left + round(padding_index / max(1, len(paddings) - 1) * plot_w)
+            y = top + plot_h - round(min(value, maximum) / maximum * plot_h)
+            points.append((x, y))
+            cv2.circle(image, (x, y), 5, color, -1, cv2.LINE_AA)
+        for first, second in zip(points, points[1:]):
+            cv2.line(image, first, second, color, 3, cv2.LINE_AA)
+        legend_y = top + roi_index * 34
+        cv2.line(image, (left + plot_w + 28, legend_y), (left + plot_w + 55, legend_y), color, 3)
+        cv2.putText(image, ROI_LABELS[roi], (left + plot_w + 65, legend_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.47, (45, 45, 45), 1, cv2.LINE_AA)
+
+    for padding_index, padding in enumerate(paddings):
+        x = left + round(padding_index / max(1, len(paddings) - 1) * plot_w)
+        centered_text(image, str(padding), x, top + plot_h + 34, scale=0.48)
+    centered_text(image, "ROI padding (source pixels)", left + plot_w // 2, height - 25, scale=0.56, thickness=2)
+    cv2.putText(image, "Enrichment", (16, top - 24), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (45, 45, 45), 1, cv2.LINE_AA)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), image)
+    return True
+
+
 def write_visualizations(results, output_dir, project_root=None, max_frames=6, alpha=0.45):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -337,6 +428,7 @@ def write_visualizations(results, output_dir, project_root=None, max_frames=6, a
             "attention_overlay": output_dir / f"{stem}_attention_overlay.png",
             "temporal_attention": output_dir / f"{stem}_temporal_attention.png",
             "layer_roi_enrichment": output_dir / f"{stem}_layer_roi_enrichment.png",
+            "roi_padding_sensitivity": output_dir / f"{stem}_roi_padding_sensitivity.png",
         }
         if write_attention_overlay(result, paths["attention_overlay"], project_root, max_frames, alpha):
             written.append(str(paths["attention_overlay"]))
@@ -344,6 +436,8 @@ def write_visualizations(results, output_dir, project_root=None, max_frames=6, a
             written.append(str(paths["temporal_attention"]))
         if write_layer_roi_heatmap(result, paths["layer_roi_enrichment"]):
             written.append(str(paths["layer_roi_enrichment"]))
+        if write_padding_sensitivity(result, paths["roi_padding_sensitivity"]):
+            written.append(str(paths["roi_padding_sensitivity"]))
     return written
 
 

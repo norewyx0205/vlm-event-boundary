@@ -14,19 +14,29 @@ except ImportError:
 
 PERTURBATION_ORDER = (
     "original",
+    "reencode_control",
     "mask_target_1",
     "mask_target_2",
     "mask_targets",
     "mask_distractors",
+    "mask_background_control",
     "remove_visual_marker",
+    "gap_removed",
+    "gap_shortened",
+    "gap_shifted",
 )
 PERTURBATION_LABELS = {
     "original": "Original",
+    "reencode_control": "Re-encode control",
     "mask_target_1": "Mask target 1",
     "mask_target_2": "Mask target 2",
     "mask_targets": "Mask both targets",
     "mask_distractors": "Mask distractors",
+    "mask_background_control": "Background sham",
     "remove_visual_marker": "Remove marker",
+    "gap_removed": "Gap removed",
+    "gap_shortened": "Gap shortened",
+    "gap_shifted": "Gap shifted",
 }
 CONDITION_PRIORITY = {
     "visual_boundary": 0,
@@ -131,13 +141,13 @@ def write_contact_sheet(rows, output_path, condition=None, source_video_id=None)
         raise ValueError("Selected rows do not contain perturbation_type values.")
 
     reference = by_perturbation.get("original", group[0])
-    frame_specs = representative_frames(reference)
+    frame_labels = [label for label, _ in representative_frames(reference)]
     cell_size = 230
     row_label_width = 112
     header_height = 82
     footer_height = 46
     width = row_label_width + cell_size * len(perturbations)
-    height = header_height + cell_size * len(frame_specs) + footer_height
+    height = header_height + cell_size * len(frame_labels) + footer_height
     image = np.full((height, width, 3), 255, dtype=np.uint8)
 
     sample_label = reference.get("base_sample_id")
@@ -160,12 +170,15 @@ def write_contact_sheet(rows, output_path, condition=None, source_video_id=None)
             scale=0.44,
         )
 
-    for row_idx, (frame_label, frame_idx) in enumerate(frame_specs):
+    for row_idx, frame_label in enumerate(frame_labels):
         y1 = header_height + row_idx * cell_size
-        centered_text(image, frame_label, row_label_width // 2, y1 + cell_size // 2 - 7, scale=0.5)
-        centered_text(image, f"frame {frame_idx}", row_label_width // 2, y1 + cell_size // 2 + 18, scale=0.42)
+        centered_text(image, frame_label, row_label_width // 2, y1 + cell_size // 2 + 5, scale=0.5)
         for column, perturbation in enumerate(perturbations):
             row = by_perturbation[perturbation]
+            row_frames = dict(representative_frames(row))
+            frame_idx = row_frames.get(frame_label)
+            if frame_idx is None:
+                continue
             frame = read_frame(resolve_path(row["video_path"]), frame_idx)
             if frame is None:
                 continue
@@ -173,6 +186,17 @@ def write_contact_sheet(rows, output_path, condition=None, source_video_id=None)
             x1 = row_label_width + column * cell_size
             image[y1 : y1 + cell_size, x1 : x1 + cell_size] = frame
             cv2.rectangle(image, (x1, y1), (x1 + cell_size - 1, y1 + cell_size - 1), (215, 215, 215), 1)
+            cv2.rectangle(image, (x1 + 7, y1 + 7), (x1 + 78, y1 + 30), (255, 255, 255), -1)
+            cv2.putText(
+                image,
+                f"frame {frame_idx}",
+                (x1 + 12, y1 + 24),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.38,
+                (55, 55, 55),
+                1,
+                cv2.LINE_AA,
+            )
 
     parameters = reference.get("perturbation_parameters") or {}
     footer = (

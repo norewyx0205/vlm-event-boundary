@@ -40,20 +40,37 @@ SIZE_SCENE_LABELS = {
 }
 PERTURBATION_ORDER = (
     "original",
+    "reencode_control",
     "mask_target_1",
     "mask_target_2",
     "mask_targets",
     "mask_distractors",
+    "mask_background_control",
     "remove_visual_marker",
+    "gap_removed",
+    "gap_shortened",
+    "gap_shifted",
 )
 PERTURBATION_LABELS = {
     "original": "Original",
+    "reencode_control": "Re-encode control",
     "mask_target_1": "Mask target 1",
     "mask_target_2": "Mask target 2",
     "mask_targets": "Mask both targets",
     "mask_distractors": "Mask distractors",
+    "mask_background_control": "Background sham mask",
     "remove_visual_marker": "Remove visual marker",
+    "gap_removed": "Gap removed",
+    "gap_shortened": "Gap shortened",
+    "gap_shifted": "Gap shifted",
 }
+TEMPORAL_INTERVENTION_ORDER = (
+    "original",
+    "reencode_control",
+    "gap_removed",
+    "gap_shortened",
+    "gap_shifted",
+)
 
 
 def ordered_size_scene_variants(rows, key="size_scene_variant"):
@@ -589,6 +606,56 @@ def paired_perturbation_strict_comparison(swap_details, baseline="original"):
     return summarize_paired_changes(detail_rows, "perturbation_type"), detail_rows
 
 
+def codec_prediction_consistency(rows):
+    by_unit = defaultdict(dict)
+    for row in rows:
+        perturbation = row.get("perturbation_type")
+        if perturbation not in {"original", "reencode_control"}:
+            continue
+        key = (
+            row.get("_source_file", ""),
+            row.get("source_video_id") or row.get("video_id"),
+            row.get("condition", ""),
+            row.get("prompt_variant", ""),
+        )
+        by_unit[key][perturbation] = row
+
+    details = []
+    for key, values in by_unit.items():
+        if not {"original", "reencode_control"}.issubset(values):
+            continue
+        original = values["original"]
+        reencoded = values["reencode_control"]
+        source_file, source_video_id, condition, prompt_variant = key
+        details.append({
+            "source_file": source_file,
+            "source_video_id": source_video_id,
+            "condition": condition,
+            "prompt_variant": prompt_variant,
+            "original_prediction": original.get("prediction"),
+            "reencode_prediction": reencoded.get("prediction"),
+            "prediction_match": original.get("prediction") == reencoded.get("prediction"),
+            "correctness_match": bool(original.get("is_correct")) == bool(reencoded.get("is_correct")),
+        })
+
+    summary = []
+    for scope in ("overall", "by_condition"):
+        grouped = defaultdict(list)
+        for row in details:
+            grouped[row["condition"] if scope == "by_condition" else "all"].append(row)
+        for condition, items in sorted(grouped.items()):
+            summary.append({
+                "scope": scope,
+                "condition": condition,
+                "rows": len(items),
+                "prediction_matches": sum(int(row["prediction_match"]) for row in items),
+                "prediction_match_rate": mean([int(row["prediction_match"]) for row in items]),
+                "correctness_matches": sum(int(row["correctness_match"]) for row in items),
+                "correctness_match_rate": mean([int(row["correctness_match"]) for row in items]),
+            })
+    return summary, details
+
+
 def size_factorial_effects(size_scene_rows, strict_by_scene):
     prompt_cells = {
         (row["target_size_condition"], row["distractor_count_condition"]): row["accuracy"]
@@ -717,6 +784,56 @@ def model_input_by_boundary(rows):
         metadata = [row.get("input_metadata") or {} for row in items]
         output.append({
             "boundary": boundary,
+            "unique_videos": len(items),
+            "source_duration_sec": summarize_numbers(row.get("duration_sec") for row in items),
+            "sampled_frames_from_video_inputs": summarize_numbers(
+                first_video_input(meta, "frame_count_from_first_dim") for meta in metadata
+            ),
+            "video_grid_thw": summarize_distinct(meta.get("video_grid_thw") for meta in metadata),
+            "visual_token_count_from_grid_thw": summarize_numbers(
+                meta.get("visual_token_count_from_grid_thw") for meta in metadata
+            ),
+            "video_token_count_from_mm_token_type_ids": summarize_numbers(
+                meta.get("video_token_count_from_mm_token_type_ids") for meta in metadata
+            ),
+            "video_inputs_shape": summarize_distinct(
+                first_video_input(meta, "shape") for meta in metadata
+            ),
+            "pixel_values_videos_shape": summarize_distinct(
+                (meta.get("pixel_values_videos") or {}).get("shape") for meta in metadata
+            ),
+        })
+    return output
+
+
+def model_input_by_perturbation_condition(rows):
+    grouped = defaultdict(list)
+    seen = set()
+    for row in rows:
+        perturbation = row.get("perturbation_type")
+        meta = row.get("input_metadata") or {}
+        if not perturbation or not meta:
+            continue
+        condition = row.get("condition") or row.get("boundary_type") or "unknown"
+        key = (
+            row.get("_source_file", ""),
+            row.get("video_path", ""),
+            perturbation,
+            condition,
+            compact_json(meta.get("video_grid_thw")),
+            compact_json(meta.get("video_inputs")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        grouped[(perturbation, condition)].append(row)
+
+    output = []
+    for (perturbation, condition), items in sorted(grouped.items()):
+        metadata = [row.get("input_metadata") or {} for row in items]
+        output.append({
+            "perturbation_type": perturbation,
+            "condition": condition,
             "unique_videos": len(items),
             "source_duration_sec": summarize_numbers(row.get("duration_sec") for row in items),
             "sampled_frames_from_video_inputs": summarize_numbers(
@@ -1413,13 +1530,77 @@ def main():
         perturbation_swap_details,
         ["perturbation_type", "condition"],
     )
-    paired_perturbation_summary, paired_perturbation_details = (
-        paired_perturbation_comparison(perturbation_rows)
+    temporal_intervention_rows = [
+        row
+        for row in perturbation_rows
+        if row.get("condition") == "temporal_boundary"
+        and row.get("perturbation_type") in TEMPORAL_INTERVENTION_ORDER
+    ]
+    temporal_intervention_swap_details = [
+        row
+        for row in perturbation_swap_details
+        if row.get("condition") == "temporal_boundary"
+        and row.get("perturbation_type") in TEMPORAL_INTERVENTION_ORDER
+    ]
+    by_temporal_intervention = grouped_accuracy(
+        temporal_intervention_rows,
+        ["perturbation_type"],
+    ) if temporal_intervention_rows else []
+    strict_by_temporal_intervention = strict_pair_metrics(
+        temporal_intervention_rows,
+        temporal_intervention_swap_details,
+        ["perturbation_type"],
+    )
+    perturbation_names = {row.get("perturbation_type") for row in perturbation_rows}
+    perturbation_baseline = (
+        "reencode_control" if "reencode_control" in perturbation_names else "original"
+    )
+    paired_perturbation_summary, paired_perturbation_details = paired_perturbation_comparison(
+        perturbation_rows,
+        baseline=perturbation_baseline,
     )
     paired_perturbation_strict_summary, paired_perturbation_strict_details = (
-        paired_perturbation_strict_comparison(perturbation_swap_details)
+        paired_perturbation_strict_comparison(
+            perturbation_swap_details,
+            baseline=perturbation_baseline,
+        )
     )
+    codec_control_summary = []
+    codec_control_details = []
+    codec_control_strict_summary = []
+    codec_control_strict_details = []
+    codec_prediction_summary = []
+    codec_prediction_details = []
+    if {"original", "reencode_control"}.issubset(perturbation_names):
+        original_summary, original_details = paired_perturbation_comparison(
+            perturbation_rows,
+            baseline="original",
+        )
+        codec_control_summary = [
+            row for row in original_summary if row.get("perturbation_type") == "reencode_control"
+        ]
+        codec_control_details = [
+            row for row in original_details if row.get("perturbation_type") == "reencode_control"
+        ]
+        original_strict_summary, original_strict_details = paired_perturbation_strict_comparison(
+            perturbation_swap_details,
+            baseline="original",
+        )
+        codec_control_strict_summary = [
+            row
+            for row in original_strict_summary
+            if row.get("perturbation_type") == "reencode_control"
+        ]
+        codec_control_strict_details = [
+            row
+            for row in original_strict_details
+            if row.get("perturbation_type") == "reencode_control"
+        ]
+        codec_prediction_summary, codec_prediction_details = codec_prediction_consistency(
+            perturbation_rows
+        )
     model_input_boundary = model_input_by_boundary(rows)
+    model_input_perturbation = model_input_by_perturbation_condition(rows)
 
     write_csv(output_dir / "accuracy_by_difficulty.csv", by_difficulty)
     write_csv(output_dir / "accuracy_by_difficulty_condition.csv", by_difficulty_condition)
@@ -1465,6 +1646,11 @@ def main():
         output_dir / "strict_pair_by_perturbation_condition.csv",
         strict_by_perturbation_condition,
     )
+    write_csv(output_dir / "accuracy_by_temporal_intervention.csv", by_temporal_intervention)
+    write_csv(
+        output_dir / "strict_pair_by_temporal_intervention.csv",
+        strict_by_temporal_intervention,
+    )
     write_csv(output_dir / "paired_perturbation_summary.csv", paired_perturbation_summary)
     write_csv(output_dir / "paired_perturbation_details.csv", paired_perturbation_details)
     write_csv(
@@ -1475,7 +1661,23 @@ def main():
         output_dir / "paired_perturbation_strict_details.csv",
         paired_perturbation_strict_details,
     )
+    write_csv(output_dir / "codec_control_summary.csv", codec_control_summary)
+    write_csv(output_dir / "codec_control_details.csv", codec_control_details)
+    write_csv(
+        output_dir / "codec_control_strict_summary.csv",
+        codec_control_strict_summary,
+    )
+    write_csv(
+        output_dir / "codec_control_strict_details.csv",
+        codec_control_strict_details,
+    )
+    write_csv(output_dir / "codec_prediction_consistency.csv", codec_prediction_summary)
+    write_csv(output_dir / "codec_prediction_consistency_details.csv", codec_prediction_details)
     write_csv(output_dir / "model_input_by_boundary.csv", model_input_boundary)
+    write_csv(
+        output_dir / "model_input_by_perturbation_condition.csv",
+        model_input_perturbation,
+    )
 
     summary = {
         "input": args.input,
@@ -1515,9 +1717,16 @@ def main():
         "accuracy_by_perturbation_condition": by_perturbation_condition,
         "strict_pair_by_perturbation": strict_by_perturbation,
         "strict_pair_by_perturbation_condition": strict_by_perturbation_condition,
+        "accuracy_by_temporal_intervention": by_temporal_intervention,
+        "strict_pair_by_temporal_intervention": strict_by_temporal_intervention,
         "paired_perturbation_summary": paired_perturbation_summary,
         "paired_perturbation_strict_summary": paired_perturbation_strict_summary,
+        "perturbation_primary_baseline": perturbation_baseline,
+        "codec_control_summary": codec_control_summary,
+        "codec_control_strict_summary": codec_control_strict_summary,
+        "codec_prediction_consistency": codec_prediction_summary,
         "model_input_by_boundary": model_input_boundary,
+        "model_input_by_perturbation_condition": model_input_perturbation,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -1798,10 +2007,10 @@ def main():
             make_feature_plot(
                 perturbation_plot_rows,
                 output_dir / "accuracy_by_perturbation_condition.png",
-                title="Prompt accuracy under ROI perturbations",
+                title="Prompt accuracy under mechanism perturbations",
                 variants=perturbation_variants,
                 labels=perturbation_labels,
-                x_axis_label="ROI perturbation",
+                x_axis_label="Perturbation",
                 y_label="Prompt accuracy",
             )
         if strict_by_perturbation_condition:
@@ -1821,10 +2030,10 @@ def main():
             make_feature_plot(
                 strict_perturbation_plot_rows,
                 output_dir / "strict_pair_by_perturbation_condition.png",
-                title="Strict both-correct under ROI perturbations",
+                title="Strict both-correct under mechanism perturbations",
                 variants=perturbation_variants,
                 labels=perturbation_labels,
-                x_axis_label="ROI perturbation",
+                x_axis_label="Perturbation",
                 y_label="Strict pair",
             )
         if strict_by_perturbation:
@@ -1842,7 +2051,7 @@ def main():
                 [perturbation_labels[name] for name in perturbation_variants],
                 ["Prompt accuracy", "Strict both-correct"],
                 perturbation_values,
-                "Prompt accuracy versus strict pair by ROI perturbation",
+                "Prompt accuracy versus strict pair by perturbation",
                 output_dir / "accuracy_vs_strict_pair_by_perturbation.png",
             )
             make_pair_outcome_plot(
@@ -1853,7 +2062,29 @@ def main():
                 output_dir / "pair_outcomes_by_perturbation.png",
                 variants=perturbation_variants,
                 labels=perturbation_labels,
-                title="Mirrored-pair outcomes under ROI perturbations",
+                title="Mirrored-pair outcomes under mechanism perturbations",
+            )
+        if strict_by_temporal_intervention:
+            temporal_names = [
+                name
+                for name in TEMPORAL_INTERVENTION_ORDER
+                if any(row["perturbation_type"] == name for row in strict_by_temporal_intervention)
+            ]
+            temporal_labels = {
+                name: PERTURBATION_LABELS.get(name, name.replace("_", " ").title())
+                for name in temporal_names
+            }
+            temporal_values = {}
+            for row in strict_by_temporal_intervention:
+                label = temporal_labels[row["perturbation_type"]]
+                temporal_values[(label, "Prompt accuracy")] = row["prompt_accuracy"]
+                temporal_values[(label, "Strict both-correct")] = row["strict_both_correct"]
+            make_grouped_bar_plot(
+                [temporal_labels[name] for name in temporal_names],
+                ["Prompt accuracy", "Strict both-correct"],
+                temporal_values,
+                "Temporal-gap interventions with fixed total duration",
+                output_dir / "accuracy_vs_strict_pair_by_temporal_intervention.png",
             )
 
     print(f"Analyzed {len(rows)} rows from {len(result_files)} raw result file(s).")

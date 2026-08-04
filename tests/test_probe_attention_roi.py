@@ -47,14 +47,18 @@ class FakeTransformers5Model:
             "mm_token_type_ids": kwargs["mm_token_type_ids"],
         }
 
+    def generate(self, input_ids, **_kwargs):
+        sequences = torch.cat([input_ids, torch.tensor([[1]])], dim=-1)
+        scores = (torch.tensor([[0.0, 1.0, 0.0]]),)
+        return SimpleNamespace(sequences=sequences, scores=scores)
+
     def __call__(self, **kwargs):
         input_ids = kwargs["input_ids"]
-        if input_ids.shape[1] == 5:
-            if kwargs["position_ids"].shape != (4, 1, 5):
+        if input_ids.shape[1] == 4:
+            if kwargs["position_ids"].shape != (4, 1, 4):
                 raise AssertionError("Prefill M-RoPE positions were not prepared.")
-            logits = torch.zeros(1, 5, 3)
-            logits[:, -1, 1] = 1
-            return SimpleNamespace(logits=logits, past_key_values=FakeCache(5))
+            logits = torch.zeros(1, 4, 3)
+            return SimpleNamespace(logits=logits, past_key_values=FakeCache(4))
 
         if input_ids.shape != (1, 1):
             raise AssertionError("The prompt was forwarded again during cached decoding.")
@@ -62,17 +66,25 @@ class FakeTransformers5Model:
             raise AssertionError("Cached M-RoPE positions were not sliced to one token.")
         if kwargs["mm_token_type_ids"].shape != (1, 1):
             raise AssertionError("Cached modality ids were not sliced to one token.")
-        if kwargs["attention_mask"].shape != (1, 6):
-            raise AssertionError("The cached attention mask has the wrong length.")
-        if kwargs["past_key_values"].get_seq_length() != 5:
-            raise AssertionError("The prefill cache has the wrong length.")
-
+        cache_length = kwargs["past_key_values"].get_seq_length()
         logits = torch.zeros(1, 1, 3)
-        logits[:, -1, 2] = 1
-        attentions = (torch.full((1, 2, 1, 6), 1 / 6),) * 2
+        if cache_length == 4:
+            if kwargs["attention_mask"].shape != (1, 5):
+                raise AssertionError("The decision attention mask has the wrong length.")
+            logits[:, -1, 1] = 1
+            attentions = (torch.full((1, 2, 1, 5), 1 / 5),) * 2
+            next_cache = FakeCache(5)
+        elif cache_length == 5:
+            if kwargs["attention_mask"].shape != (1, 6):
+                raise AssertionError("The continuation attention mask has the wrong length.")
+            logits[:, -1, 2] = 1
+            attentions = None
+            next_cache = FakeCache(6)
+        else:
+            raise AssertionError(f"Unexpected cache length: {cache_length}")
         return SimpleNamespace(
             logits=logits,
-            past_key_values=FakeCache(6),
+            past_key_values=next_cache,
             attentions=attentions,
         )
 
@@ -88,7 +100,7 @@ class AttentionCacheTest(unittest.TestCase):
         original_cache_api = probe.generation_cache_api
         probe.generation_cache_api = lambda: "next_sequence_length"
         try:
-            response, attentions, metadata = probe.greedy_generate_with_answer_attention(
+            response, attentions, metadata = probe.greedy_generate_with_decision_attention(
                 FakeTransformers5Model(),
                 FakeProcessor(),
                 inputs,
@@ -98,9 +110,60 @@ class AttentionCacheTest(unittest.TestCase):
             probe.generation_cache_api = original_cache_api
 
         self.assertEqual(response, "A")
-        self.assertEqual(attentions[0].shape, (1, 2, 1, 6))
+        self.assertEqual(attentions[0].shape, (1, 2, 1, 5))
         self.assertEqual(metadata["cache_api"], "next_sequence_length")
         self.assertEqual(metadata["prefill_position_ids_shape"], [4, 1, 5])
+        self.assertEqual(metadata["prefix_cache_length"], 4)
+        self.assertTrue(metadata["standard_first_token_match"])
+        self.assertEqual(
+            metadata["attention_semantics"],
+            "prompt_final_position_decision_query",
+        )
+
+    def test_overlap_assignment_keeps_small_object_at_cell_edge(self):
+        row = {
+            "target_objects": [{
+                "id": 1,
+                "shape": "circle",
+                "radius": 14,
+                "from": [31, 31],
+                "to": [31, 31],
+                "start_frame": 0,
+                "end_frame": 0,
+            }],
+            "distractors": [],
+            "total_frames": 1,
+            "boundary_timing": {"visual_marker": "none"},
+        }
+        label_map = probe.spatial_roi_label_map(row, 0, 0, 512, 512)
+        weights = probe.cell_roi_weights(label_map, 0, 0, 16, 16, 512, 512)
+
+        self.assertGreater(weights.get("target_1", 0.0), 0.0)
+        self.assertEqual(
+            probe.spatial_roi(row, 16, 16, 0, 0, 512, 512),
+            "background",
+        )
+
+    def test_fallback_selection_preserves_pairs_and_spreads_conditions(self):
+        rows = []
+        for base_id in (1, 2):
+            for condition in ("low_boundary", "temporal_boundary"):
+                for variant in ("original", "swapped"):
+                    rows.append({
+                        "eval_id": f"{base_id}_{condition}_{variant}",
+                        "pairing_id": f"{base_id}_{condition}",
+                        "base_sample_id": base_id,
+                        "condition": condition,
+                        "prompt_variant": variant,
+                    })
+
+        selected = probe.select_probe_rows(rows, 4)
+
+        self.assertEqual({row["condition"] for row in selected}, {"low_boundary", "temporal_boundary"})
+        self.assertEqual(
+            {row["prompt_variant"] for row in selected},
+            {"original", "swapped"},
+        )
 
 
 if __name__ == "__main__":
