@@ -413,14 +413,19 @@ python scripts/probe_attention_roi.py \
   --roi_padding 8 \
   --roi_assignment overlap \
   --roi_padding_sensitivity 0,4,8,12 \
+  --parity_atol 0.10 \
   --visualization_layer -1 \
   --head_reduction mean \
   --empty_cache_each_sample
 ```
 
-The split-cache first token must match standard greedy `model.generate`; rows
-carrying `archived_prediction` must also match the main evaluation, otherwise
-the probe fails. The probe maps model-visible video tokens through
+The split-cache first token must exactly match standard greedy `model.generate`;
+rows carrying `archived_prediction` must also match the main evaluation,
+otherwise the probe fails. Full-vocabulary logits are additionally checked with
+an explicit FP16 tolerance (`rtol=0.001`, `atol=0.10`) because prefix splitting
+can change CUDA accumulation order without changing the decision. Maximum and
+mean logit differences, top-10 overlap, cosine similarity, and top-1 margins are
+archived for audit. The probe maps model-visible video tokens through
 `video_grid_thw`, accounts for Qwen3-VL spatial merging, and uses the processor's
 sampled source-frame indices.
 For every inspected evaluation row it writes:

@@ -115,6 +115,9 @@ class AttentionCacheTest(unittest.TestCase):
         self.assertEqual(metadata["prefill_position_ids_shape"], [4, 1, 5])
         self.assertEqual(metadata["prefix_cache_length"], 4)
         self.assertTrue(metadata["standard_first_token_match"])
+        self.assertTrue(metadata["standard_logits_allclose"])
+        self.assertEqual(metadata["standard_top10_token_overlap"], 1.0)
+        self.assertEqual(metadata["standard_logits_max_abs_diff"], 0.0)
         self.assertEqual(
             metadata["attention_semantics"],
             "prompt_final_position_decision_query",
