@@ -321,7 +321,8 @@ python scripts/make_roi_perturbation_dataset.py \
   --perturbations original,reencode_control,mask_target_1,mask_target_2,mask_distractors,mask_background_control,remove_visual_marker,gap_removed,gap_shortened,gap_shifted \
   --mask_mode dynamic \
   --mask_scope all_frames \
-  --mask_padding 6
+  --mask_padding 6 \
+  --sham_clearance 4
 
 python scripts/visualize_roi_perturbations.py \
   --annotation_path data/perturbations/l5_clear_small_many/annotations.jsonl \
@@ -357,7 +358,9 @@ not contain annotated objects. The stats record exact area-match rate and both
 trajectory lengths. Candidate offsets are re-ranked with dense temporal sampling,
 and generation fails if the realised path-length error exceeds
 `--sham_max_path_relative_error` (default `0.10`); target-matched sham references
-are also available. Source audio is preserved by default. The
+are also available. The default `--sham_clearance 4`, combined with the 6-pixel
+mask padding, keeps sham assignments at least 10 pixels outside annotated object
+masks. Source audio is preserved by default. The
 dataset folder records `perturbation_stats.jsonl`, separating mask-area
 assignments from the union of pixels that actually changed. For the re-encode
 control it also records decoded-video MAE, MSE, PSNR, and changed-pixel rate.

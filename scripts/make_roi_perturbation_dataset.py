@@ -990,7 +990,7 @@ def main():
         choices=["distractors", "target_1", "target_2"],
         default="distractors",
     )
-    parser.add_argument("--sham_clearance", type=int, default=8)
+    parser.add_argument("--sham_clearance", type=int, default=4)
     parser.add_argument("--sham_max_path_relative_error", type=float, default=0.10)
     parser.add_argument("--gap_shortened_sec", type=float, default=1.0)
     parser.add_argument("--boundary_padding_frames", type=int, default=0)
@@ -1050,6 +1050,12 @@ def main():
     for source_row, eval_rows in paired_rows(rows):
         if args.max_videos is not None and processed >= args.max_videos:
             break
+        print(
+            f"ROI source {processed + 1}: video_id={source_row.get('video_id')}, "
+            f"base_sample_id={source_row.get('base_sample_id')}, "
+            f"condition={source_row.get('condition')}",
+            flush=True,
+        )
         source_video = PROJECT_ROOT / source_row["video_path"]
         if not source_video.exists():
             source_video = Path(source_row["video_path"])
@@ -1099,13 +1105,22 @@ def main():
                 output_video = source_video
             else:
                 output_video = video_root / perturbation_type / source_row["video_id"]
-                stats, metadata_updates = perturb_video(
-                    source_video,
-                    output_video,
-                    source_row,
-                    perturbation_type,
-                    args,
-                )
+                try:
+                    stats, metadata_updates = perturb_video(
+                        source_video,
+                        output_video,
+                        source_row,
+                        perturbation_type,
+                        args,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "ROI perturbation failed for "
+                        f"video_id={source_row.get('video_id')}, "
+                        f"base_sample_id={source_row.get('base_sample_id')}, "
+                        f"condition={source_row.get('condition')}, "
+                        f"perturbation_type={perturbation_type}: {exc}"
+                    ) from exc
 
             stat_row = {
                 "source_video_id": source_row["video_id"],
