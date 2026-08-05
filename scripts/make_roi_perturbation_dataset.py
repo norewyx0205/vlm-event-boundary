@@ -413,6 +413,29 @@ def shift_value_after_gap(value, gap_end, amount):
     return int(value) - amount if int(value) >= gap_end else int(value)
 
 
+def remap_object_timing(
+    obj,
+    perturbation_type,
+    gap_start,
+    gap_end,
+    gap_frames,
+    moved_frames,
+):
+    updated = dict(obj)
+    window = motion_window(updated)
+    if window is None or updated.get("from") == updated.get("to"):
+        return updated
+    start, end = window
+    if perturbation_type == "gap_shifted":
+        if start < gap_start:
+            updated["start_frame"] = start + gap_frames
+            updated["end_frame"] = end + gap_frames
+    else:
+        updated["start_frame"] = shift_value_after_gap(start, gap_end, moved_frames)
+        updated["end_frame"] = shift_value_after_gap(end, gap_end, moved_frames)
+    return updated
+
+
 def temporal_intervention(row, perturbation_type, total_frames, fps, shortened_sec):
     event = dict(row.get("event_timing") or {})
     boundary = dict(row.get("boundary_timing") or {})
@@ -494,10 +517,22 @@ def temporal_intervention(row, perturbation_type, total_frames, fps, shortened_s
         raise RuntimeError(
             f"Temporal intervention produced {len(plan)} frames; expected {total_frames}."
         )
+    distractor_updates = [
+        remap_object_timing(
+            distractor,
+            perturbation_type,
+            gap_start,
+            gap_end,
+            gap_frames,
+            moved_frames,
+        )
+        for distractor in timed_objects
+    ]
     updates = {
         "event_timing": event,
         "boundary_timing": boundary,
         "target_objects": target_updates,
+        "distractors": distractor_updates,
         "temporal_intervention": {
             "type": perturbation_type,
             "original_gap_frames": gap_frames,

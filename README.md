@@ -369,7 +369,9 @@ control it also records decoded-video MAE, MSE, PSNR, and changed-pixel rate.
 videos with no motion inside the gap. They preserve total frame count: the gap
 is removed, shortened to `--gap_shortened_sec` (default 1 second), or moved
 before the first target event. Updated event and boundary timings are written to
-the derived annotations. Analysis automatically uses `reencode_control` as the
+the derived annotations, together with explicit remapped `start_frame` and
+`end_frame` values for every moving distractor. Analysis automatically uses
+`reencode_control` as the
 primary perturbation baseline when present and writes separate codec-control
 prompt and strict-pair tables for `original` versus `reencode_control`, plus
 `codec_prediction_consistency.csv` for exact A/B/UNKNOWN agreement.
@@ -394,7 +396,9 @@ python scripts/select_attention_cases.py \
 
 The selector prioritizes matched behavioral cases such as distractor-mask
 repairs, target-mask failures, perturbation negative controls, and contrasting
-temporal/visual pair outcomes. Then run the ROI probe. Eager attention is
+temporal/visual pair outcomes. A temporal/visual contrast is an atomic two-pair
+bundle: selection includes both conditions for the same base stimulus or neither.
+Then run the ROI probe. Eager attention is
 required. The probe prefills every prompt token except the final token and uses
 the final prompt token as a one-token query whose logits predict the first A/B
 answer token.
@@ -428,6 +432,10 @@ mean logit differences, top-10 overlap, cosine similarity, and top-1 margins are
 archived for audit. The probe maps model-visible video tokens through
 `video_grid_thw`, accounts for Qwen3-VL spatial merging, and uses the processor's
 sampled source-frame indices.
+When one temporal patch combines multiple sampled frames, ROI overlap and phase
+membership are computed for each constituent frame and averaged. Patches that
+cross an event boundary retain fractional phase weights and are displayed as
+`Mixed phase`, rather than being assigned from a rounded mean frame alone.
 For every inspected evaluation row it writes:
 
 - a decision-position attention overlay on representative source frames

@@ -65,13 +65,40 @@ def select_cases(annotation_rows, main_rows, perturbation_rows, max_video_pairs)
     label_order = []
     seen_candidates = set()
 
-    def add(key, label):
-        if key in seen_candidates or main_outcomes.get(key) is None:
+    def add_bundle(keys, label):
+        keys = tuple(keys)
+        if (
+            not keys
+            or any(key in seen_candidates for key in keys)
+            or any(main_outcomes.get(key) is None for key in keys)
+        ):
             return
-        seen_candidates.add(key)
+        seen_candidates.update(keys)
         if label not in candidates_by_label:
             label_order.append(label)
-        candidates_by_label[label].append(key)
+        candidates_by_label[label].append(keys)
+
+    def add(key, label):
+        add_bundle((key,), label)
+
+    # Matched temporal/visual contrasts are atomic two-pair bundles and receive
+    # first priority so a small case budget cannot silently retain only one side.
+    base_ids = sorted({key[0] for key in main_outcomes})
+    for base_id in base_ids:
+        temporal_key = (base_id, "temporal_boundary")
+        visual_key = (base_id, "visual_boundary")
+        temporal = main_outcomes.get(temporal_key)
+        visual = main_outcomes.get(visual_key)
+        if temporal == "both_correct" and visual == "both_wrong":
+            add_bundle(
+                (temporal_key, visual_key),
+                "temporal_stable_visual_both_wrong",
+            )
+        elif temporal == "both_correct" and visual == "position_sensitive":
+            add_bundle(
+                (temporal_key, visual_key),
+                "temporal_stable_visual_position_sensitive",
+            )
 
     for key, variants in sorted(perturb_pairs.items()):
         baseline_name = "reencode_control" if "reencode_control" in variants else "original"
@@ -93,17 +120,6 @@ def select_cases(annotation_rows, main_rows, perturbation_rows, max_video_pairs)
         if baseline is not None and available and all(value == baseline for value in available):
             add(key, "perturbation_negative_control")
 
-    base_ids = sorted({key[0] for key in main_outcomes})
-    for base_id in base_ids:
-        temporal = main_outcomes.get((base_id, "temporal_boundary"))
-        visual = main_outcomes.get((base_id, "visual_boundary"))
-        if temporal == "both_correct" and visual == "both_wrong":
-            add((base_id, "temporal_boundary"), "temporal_stable_visual_both_wrong")
-            add((base_id, "visual_boundary"), "temporal_stable_visual_both_wrong")
-        elif temporal == "both_correct" and visual == "position_sensitive":
-            add((base_id, "temporal_boundary"), "temporal_stable_visual_position_sensitive")
-            add((base_id, "visual_boundary"), "temporal_stable_visual_position_sensitive")
-
     for outcome in ("both_correct", "position_sensitive", "both_wrong"):
         for key, value in sorted(main_outcomes.items()):
             if value == outcome:
@@ -114,18 +130,28 @@ def select_cases(annotation_rows, main_rows, perturbation_rows, max_video_pairs)
     while len(candidates) < max_video_pairs:
         added = False
         for label in label_order:
-            values = candidates_by_label[label]
-            if round_index < len(values):
-                candidates.append((values[round_index], label))
-                added = True
-                if len(candidates) >= max_video_pairs:
-                    break
+            bundles = candidates_by_label[label]
+            if round_index >= len(bundles):
+                continue
+            bundle = bundles[round_index]
+            if len(candidates) + len(bundle) > max_video_pairs:
+                continue
+            bundle_id = "__".join(
+                [label] + [f"{base_id}_{condition}" for base_id, condition in bundle]
+            )
+            candidates.extend(
+                (key, label, bundle_id, len(bundle))
+                for key in bundle
+            )
+            added = True
+            if len(candidates) >= max_video_pairs:
+                break
         if not added:
             break
         round_index += 1
 
     selected = []
-    for (base_id, condition), label in candidates:
+    for (base_id, condition), label, bundle_id, bundle_size in candidates:
         rows = [
             row
             for row in annotation_rows
@@ -138,6 +164,8 @@ def select_cases(annotation_rows, main_rows, perturbation_rows, max_video_pairs)
                 raise ValueError(f"Main result is missing selected eval_id={row['eval_id']}")
             output = dict(row)
             output["attention_case_label"] = label
+            output["attention_case_bundle_id"] = bundle_id
+            output["attention_case_bundle_size"] = bundle_size
             output["archived_prediction"] = archived.get("prediction")
             output["archived_is_correct"] = archived.get("is_correct")
             output["archived_raw_response"] = archived.get("raw_response")

@@ -142,18 +142,29 @@ def metadata_value(metadata, key, default=None):
     return getattr(metadata, key, default)
 
 
-def source_frame_indices(video_metadata, grid_t, total_frames):
+def source_frame_groups(video_metadata, grid_t, total_frames):
     sampled = metadata_value(video_metadata, "frames_indices")
     if sampled is not None:
         sampled = [int(value) for value in sampled]
     if sampled:
-        groups = np.array_split(np.asarray(sampled, dtype=np.float32), grid_t)
-        return [int(round(float(group.mean()))) for group in groups]
+        groups = np.array_split(np.asarray(sampled, dtype=np.int64), grid_t)
+        fallback = source_frame_groups(None, grid_t, total_frames)
+        return [
+            [int(value) for value in group.tolist()] if len(group) else fallback[idx]
+            for idx, group in enumerate(groups)
+        ]
     if grid_t <= 1:
-        return [max(0, total_frames // 2)]
+        return [[max(0, total_frames // 2)]]
     return [
-        int(round(idx / (grid_t - 1) * max(0, total_frames - 1)))
+        [int(round(idx / (grid_t - 1) * max(0, total_frames - 1)))]
         for idx in range(grid_t)
+    ]
+
+
+def source_frame_indices(video_metadata, grid_t, total_frames):
+    return [
+        int(round(float(np.mean(group))))
+        for group in source_frame_groups(video_metadata, grid_t, total_frames)
     ]
 
 
@@ -197,6 +208,12 @@ def temporal_phase(row, frame_idx):
     if second_start is not None and second_end is not None and second_start <= frame_idx <= second_end:
         return "event_2"
     return "post_event"
+
+
+def temporal_group_phase_weights(row, frame_group):
+    counts = Counter(temporal_phase(row, frame_idx) for frame_idx in frame_group)
+    total = max(1, len(frame_group))
+    return {label: count / total for label, count in sorted(counts.items())}
 
 
 def spatial_roi(row, x, y, frame_idx, roi_padding, width, height):
@@ -285,16 +302,21 @@ def token_descriptors(
     merged_w,
     width,
     height,
-    frame_indices,
+    frame_groups,
     roi_padding,
     roi_assignment,
 ):
     descriptors = []
     for temporal_idx in range(grid_t):
-        source_frame = frame_indices[temporal_idx]
-        phase = temporal_phase(row, source_frame)
-        label_map = (
-            spatial_roi_label_map(row, source_frame, roi_padding, width, height)
+        source_frames = frame_groups[temporal_idx]
+        source_frame = int(round(float(np.mean(source_frames))))
+        phase_weights = temporal_group_phase_weights(row, source_frames)
+        phase = next(iter(phase_weights)) if len(phase_weights) == 1 else "mixed"
+        label_maps = (
+            [
+                spatial_roi_label_map(row, frame_idx, roi_padding, width, height)
+                for frame_idx in source_frames
+            ]
             if roi_assignment == "overlap"
             else None
         )
@@ -302,36 +324,44 @@ def token_descriptors(
             y = (y_idx + 0.5) * height / merged_h
             for x_idx in range(merged_w):
                 x = (x_idx + 0.5) * width / merged_w
-                if label_map is not None:
-                    weights = cell_roi_weights(
-                        label_map,
-                        x_idx,
-                        y_idx,
-                        merged_w,
-                        merged_h,
-                        width,
-                        height,
-                    )
+                weights = defaultdict(float)
+                if label_maps is not None:
+                    for label_map in label_maps:
+                        frame_weights = cell_roi_weights(
+                            label_map,
+                            x_idx,
+                            y_idx,
+                            merged_w,
+                            merged_h,
+                            width,
+                            height,
+                        )
+                        for label, weight in frame_weights.items():
+                            weights[label] += weight / len(label_maps)
                     dominant = max(weights, key=weights.get)
                 else:
-                    dominant = spatial_roi(
-                        row,
-                        x,
-                        y,
-                        source_frame,
-                        roi_padding,
-                        width,
-                        height,
-                    )
-                    weights = {dominant: 1.0}
+                    for frame_idx in source_frames:
+                        label = spatial_roi(
+                            row,
+                            x,
+                            y,
+                            frame_idx,
+                            roi_padding,
+                            width,
+                            height,
+                        )
+                        weights[label] += 1.0 / len(source_frames)
+                    dominant = max(weights, key=weights.get)
                 descriptors.append({
                     "temporal_index": temporal_idx,
                     "source_frame": source_frame,
+                    "source_frames": source_frames,
                     "x_index": x_idx,
                     "y_index": y_idx,
                     "spatial_roi": dominant,
-                    "spatial_roi_weights": weights,
+                    "spatial_roi_weights": dict(weights),
                     "temporal_phase": phase,
+                    "temporal_phase_weights": phase_weights,
                 })
     return descriptors
 
@@ -416,7 +446,15 @@ def aggregate_attention(
             f"grid={grid_t, grid_h, grid_w}, merge_size={merge_size}."
         )
 
-    frame_indices = source_frame_indices(first_video_metadata(video_kwargs), grid_t, total_frames)
+    frame_groups = source_frame_groups(
+        first_video_metadata(video_kwargs),
+        grid_t,
+        total_frames,
+    )
+    frame_indices = [
+        int(round(float(np.mean(group))))
+        for group in frame_groups
+    ]
     descriptors = token_descriptors(
         row,
         grid_t,
@@ -424,12 +462,12 @@ def aggregate_attention(
         merged_w,
         width,
         height,
-        frame_indices,
+        frame_groups,
         roi_padding,
         roi_assignment,
     )
     spatial_assignments = [item["spatial_roi_weights"] for item in descriptors]
-    temporal_labels = [item["temporal_phase"] for item in descriptors]
+    temporal_assignments = [item["temporal_phase_weights"] for item in descriptors]
     selected_layer = select_layer_index(layer_index, len(attentions))
 
     layer_profiles = []
@@ -446,7 +484,7 @@ def aggregate_attention(
             "layer": idx,
             "visual_attention_fraction": float(visual_scores.sum() / max(float(all_scores.sum()), 1e-12)),
             "spatial_roi": attention_distribution(visual_scores, spatial_assignments),
-            "temporal_phase": attention_distribution(visual_scores, temporal_labels),
+            "temporal_phase": attention_distribution(visual_scores, temporal_assignments),
         })
         if idx == selected_layer:
             selected_scores = visual_scores
@@ -455,7 +493,14 @@ def aggregate_attention(
     visual_total = max(float(selected_scores.sum()), 1e-12)
     attention_map = (selected_scores / visual_total).reshape(grid_t, merged_h, merged_w)
     temporal_attention = attention_map.sum(dim=(1, 2)).tolist()
-    temporal_phases = [temporal_phase(row, frame_idx) for frame_idx in frame_indices]
+    temporal_phase_weights = [
+        temporal_group_phase_weights(row, group)
+        for group in frame_groups
+    ]
+    temporal_phases = [
+        next(iter(weights)) if len(weights) == 1 else "mixed"
+        for weights in temporal_phase_weights
+    ]
     targets = sorted(row.get("target_objects") or [], key=lambda item: item["id"])
     padding_profiles = {}
     for padding in roi_padding_sensitivity:
@@ -466,7 +511,7 @@ def aggregate_attention(
             merged_w,
             width,
             height,
-            frame_indices,
+            frame_groups,
             padding,
             roi_assignment,
         )
@@ -484,6 +529,7 @@ def aggregate_attention(
         "source_video_shape": [total_frames, height, width],
         "source_fps": source_fps,
         "source_frame_indices": frame_indices,
+        "source_frame_groups": frame_groups,
         "selected_layer": selected_layer,
         "head_reduction": head_reduction,
         "roi_assignment_method": roi_assignment,
@@ -493,9 +539,13 @@ def aggregate_attention(
             selected_scores.sum() / max(float(selected_all_scores.sum()), 1e-12)
         ),
         "spatial_roi_attention": attention_distribution(selected_scores, spatial_assignments),
-        "temporal_phase_attention": attention_distribution(selected_scores, temporal_labels),
+        "temporal_phase_attention": attention_distribution(
+            selected_scores,
+            temporal_assignments,
+        ),
         "temporal_attention": temporal_attention,
         "temporal_phases": temporal_phases,
+        "temporal_phase_weights": temporal_phase_weights,
         "attention_map": attention_map.tolist(),
         "layer_roi_profiles": layer_profiles,
         "target_labels": {

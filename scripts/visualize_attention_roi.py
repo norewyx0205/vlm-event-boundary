@@ -29,6 +29,7 @@ PHASE_LABELS = {
     "boundary": "Boundary",
     "event_2": "Event 2",
     "post_event": "Post-event",
+    "mixed": "Mixed phase",
 }
 PHASE_COLORS = {
     "pre_event": (244, 244, 244),
@@ -36,6 +37,7 @@ PHASE_COLORS = {
     "boundary": (239, 233, 249),
     "event_2": (232, 247, 238),
     "post_event": (244, 244, 244),
+    "mixed": (235, 240, 240),
 }
 
 
@@ -160,6 +162,7 @@ def write_attention_overlay(result, output_path, project_root=None, max_frames=6
     centered_text(image, attention_result_subtitle(result), width // 2, 57, scale=0.44, color=(75, 75, 75))
 
     phases = result.get("temporal_phases") or []
+    source_groups = result.get("source_frame_groups") or []
     temporal_attention = result.get("temporal_attention") or []
     for column, temporal_idx in enumerate(indices):
         frame_idx = int(source_frames[temporal_idx])
@@ -172,7 +175,18 @@ def write_attention_overlay(result, output_path, project_root=None, max_frames=6
         image[title_h : title_h + cell_h, x1 : x1 + cell_w] = overlay
         phase = phases[temporal_idx] if temporal_idx < len(phases) else ""
         mass = temporal_attention[temporal_idx] if temporal_idx < len(temporal_attention) else 0.0
-        centered_text(image, f"Frame {frame_idx}", x1 + cell_w // 2, title_h + cell_h + 23)
+        frame_group = (
+            source_groups[temporal_idx]
+            if temporal_idx < len(source_groups)
+            else [frame_idx]
+        )
+        frame_label = "/".join(str(value) for value in frame_group)
+        centered_text(
+            image,
+            f"Frames {frame_label}",
+            x1 + cell_w // 2,
+            title_h + cell_h + 23,
+        )
         centered_text(
             image,
             f"{PHASE_LABELS.get(phase, phase)} | mass {mass:.3f}",

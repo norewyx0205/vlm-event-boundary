@@ -30,7 +30,26 @@ def temporal_row():
                 "end_frame": 135,
             },
         ],
-        "distractors": [],
+        "distractors": [
+            {
+                "id": 1,
+                "shape": "circle",
+                "motion_kind": "unrelated_motion",
+                "from": [50, 200],
+                "to": [100, 200],
+                "start_frame": 30,
+                "end_frame": 60,
+            },
+            {
+                "id": 2,
+                "shape": "circle",
+                "motion_kind": "unrelated_motion",
+                "from": [200, 200],
+                "to": [250, 200],
+                "start_frame": 105,
+                "end_frame": 135,
+            },
+        ],
         "event_timing": {
             "first_event_start_frame": 30,
             "first_event_end_frame": 60,
@@ -59,6 +78,9 @@ class TemporalInterventionTest(unittest.TestCase):
         self.assertEqual(updates["boundary_timing"]["gap_frames"], 0)
         self.assertEqual(updates["event_timing"]["second_event_start_frame"], 60)
         self.assertEqual(updates["target_objects"][1]["start_frame"], 60)
+        self.assertEqual(updates["distractors"][0]["start_frame"], 30)
+        self.assertEqual(updates["distractors"][1]["start_frame"], 60)
+        self.assertEqual(updates["distractors"][1]["end_frame"], 90)
 
     def test_gap_shortened_keeps_one_second_between_events(self):
         plan, updates = perturb.temporal_intervention(
@@ -68,6 +90,9 @@ class TemporalInterventionTest(unittest.TestCase):
         self.assertEqual(len(plan), 270)
         self.assertEqual(updates["boundary_timing"]["gap_frames"], 15)
         self.assertEqual(updates["event_timing"]["second_event_start_frame"], 75)
+        self.assertEqual(updates["distractors"][0]["start_frame"], 30)
+        self.assertEqual(updates["distractors"][1]["start_frame"], 75)
+        self.assertEqual(updates["distractors"][1]["end_frame"], 105)
 
     def test_gap_shifted_places_hold_before_first_event(self):
         plan, updates = perturb.temporal_intervention(
@@ -78,6 +103,9 @@ class TemporalInterventionTest(unittest.TestCase):
         self.assertEqual(updates["boundary_timing"]["temporal_gap_location"], "before_first_event")
         self.assertEqual(updates["event_timing"]["first_event_start_frame"], 75)
         self.assertEqual(updates["event_timing"]["second_event_start_frame"], 105)
+        self.assertEqual(updates["distractors"][0]["start_frame"], 75)
+        self.assertEqual(updates["distractors"][0]["end_frame"], 105)
+        self.assertEqual(updates["distractors"][1]["start_frame"], 105)
 
     def test_background_sham_matches_reference_area_without_object_overlap(self):
         reference = np.zeros((64, 64), dtype=np.uint8)

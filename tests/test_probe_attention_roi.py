@@ -147,6 +147,29 @@ class AttentionCacheTest(unittest.TestCase):
             "background",
         )
 
+    def test_temporal_patch_preserves_fractional_boundary_phases(self):
+        row = {
+            "event_timing": {
+                "first_event_start_frame": 30,
+                "first_event_end_frame": 60,
+                "second_event_start_frame": 105,
+                "second_event_end_frame": 135,
+            },
+            "boundary_timing": {
+                "boundary_start_frame": 60,
+                "boundary_end_frame": 105,
+            },
+        }
+        groups = probe.source_frame_groups(
+            {"frames_indices": [59, 61]},
+            grid_t=1,
+            total_frames=270,
+        )
+        weights = probe.temporal_group_phase_weights(row, groups[0])
+
+        self.assertEqual(groups, [[59, 61]])
+        self.assertEqual(weights, {"boundary": 0.5, "event_1": 0.5})
+
     def test_fallback_selection_preserves_pairs_and_spreads_conditions(self):
         rows = []
         for base_id in (1, 2):
