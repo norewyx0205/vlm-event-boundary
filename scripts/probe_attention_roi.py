@@ -50,6 +50,9 @@ except ImportError:
     from visualize_attention_roi import write_visualizations
 
 
+ATTENTION_METRIC_SCHEMA = "mass_area_enrichment_v2"
+
+
 def object_label(obj):
     reference = obj.get("reference_label")
     if reference:
@@ -366,8 +369,11 @@ def token_descriptors(
     return descriptors
 
 
-def attention_distribution(scores, assignments):
-    total_attention = float(scores.sum())
+def attention_distribution(scores, assignments, all_attention_total=None):
+    visual_attention_total = float(scores.sum())
+    if all_attention_total is None:
+        all_attention_total = visual_attention_total
+    all_attention_total = float(all_attention_total)
     counts = defaultdict(float)
     masses = defaultdict(float)
     for score, assignment in zip(scores.tolist(), assignments):
@@ -379,15 +385,33 @@ def attention_distribution(scores, assignments):
     output = {}
     for label in sorted(counts):
         token_fraction = counts[label] / total_tokens if total_tokens else 0.0
-        normalized_attention = masses[label] / total_attention if total_attention else 0.0
+        normalized_attention = (
+            masses[label] / visual_attention_total
+            if visual_attention_total
+            else 0.0
+        )
+        all_token_share = (
+            masses[label] / all_attention_total
+            if all_attention_total
+            else 0.0
+        )
+        mean_per_token = masses[label] / counts[label] if counts[label] else 0.0
+        enrichment = normalized_attention / token_fraction if token_fraction else None
         output[label] = {
             "token_count": counts[label],
             "effective_token_count": counts[label],
             "token_fraction": token_fraction,
             "attention_mass": masses[label],
             "normalized_visual_attention": normalized_attention,
-            "mean_attention_per_token": masses[label] / counts[label] if counts[label] else 0.0,
-            "enrichment": normalized_attention / token_fraction if token_fraction else None,
+            "mean_attention_per_token": mean_per_token,
+            "enrichment": enrichment,
+            # Explicit aliases prevent area-normalised enrichment from being
+            # mistaken for the amount of attention allocated to an ROI.
+            "all_token_attention_share": all_token_share,
+            "visual_normalized_attention_mass": normalized_attention,
+            "effective_token_area_share": token_fraction,
+            "mean_attention_per_effective_token": mean_per_token,
+            "area_normalized_enrichment": enrichment,
         }
     return output
 
@@ -480,11 +504,22 @@ def aggregate_attention(
                 f"Attention key length {len(all_scores)} does not cover video position {max(positions)}."
             )
         visual_scores = all_scores[positions]
+        all_attention_total = float(all_scores.sum())
         layer_profiles.append({
             "layer": idx,
-            "visual_attention_fraction": float(visual_scores.sum() / max(float(all_scores.sum()), 1e-12)),
-            "spatial_roi": attention_distribution(visual_scores, spatial_assignments),
-            "temporal_phase": attention_distribution(visual_scores, temporal_assignments),
+            "visual_attention_fraction": float(
+                visual_scores.sum() / max(all_attention_total, 1e-12)
+            ),
+            "spatial_roi": attention_distribution(
+                visual_scores,
+                spatial_assignments,
+                all_attention_total,
+            ),
+            "temporal_phase": attention_distribution(
+                visual_scores,
+                temporal_assignments,
+                all_attention_total,
+            ),
         })
         if idx == selected_layer:
             selected_scores = visual_scores
@@ -518,9 +553,11 @@ def aggregate_attention(
         padding_profiles[str(padding)] = attention_distribution(
             selected_scores,
             [item["spatial_roi_weights"] for item in padding_descriptors],
+            float(selected_all_scores.sum()),
         )
 
     return {
+        "attention_metric_schema": ATTENTION_METRIC_SCHEMA,
         "video_token_position_source": position_source,
         "visual_token_count": len(positions),
         "raw_video_grid_thw": [grid_t, grid_h, grid_w],
@@ -538,10 +575,15 @@ def aggregate_attention(
         "selected_layer_visual_attention_fraction": float(
             selected_scores.sum() / max(float(selected_all_scores.sum()), 1e-12)
         ),
-        "spatial_roi_attention": attention_distribution(selected_scores, spatial_assignments),
+        "spatial_roi_attention": attention_distribution(
+            selected_scores,
+            spatial_assignments,
+            float(selected_all_scores.sum()),
+        ),
         "temporal_phase_attention": attention_distribution(
             selected_scores,
             temporal_assignments,
+            float(selected_all_scores.sum()),
         ),
         "temporal_attention": temporal_attention,
         "temporal_phases": temporal_phases,
@@ -1306,6 +1348,7 @@ def main():
     standard_logits_matches = [value for value in standard_logits_matches if value is not None]
     parity_summary = {
         "attention_semantics": "prompt_final_position_attention_predicting_first_answer_token",
+        "attention_metric_schema": ATTENTION_METRIC_SCHEMA,
         "rows": len(outputs),
         "standard_first_token_rows": len(standard_token_matches),
         "standard_first_token_matches": sum(int(value) for value in standard_token_matches),
@@ -1338,6 +1381,7 @@ def main():
         "generation_cache_api": generation_cache_api(),
         "attention_cache_strategy": "prefix_prefill_then_prompt_final_decision_query",
         "attention_semantics": "prompt_final_position_attention_predicting_first_answer_token",
+        "attention_metric_schema": ATTENTION_METRIC_SCHEMA,
         "selected_eval_ids": [row.get("eval_id") for row in rows],
         "environment": environment_metadata(model),
     }

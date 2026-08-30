@@ -90,6 +90,24 @@ class FakeTransformers5Model:
 
 
 class AttentionCacheTest(unittest.TestCase):
+    def test_attention_distribution_separates_mass_area_and_enrichment(self):
+        scores = torch.tensor([0.2, 0.1])
+        distribution = probe.attention_distribution(
+            scores,
+            ["target_1", "target_2"],
+            all_attention_total=1.0,
+        )
+
+        target_1 = distribution["target_1"]
+        self.assertAlmostEqual(target_1["all_token_attention_share"], 0.2)
+        self.assertAlmostEqual(
+            target_1["visual_normalized_attention_mass"],
+            2 / 3,
+        )
+        self.assertAlmostEqual(target_1["effective_token_area_share"], 0.5)
+        self.assertAlmostEqual(target_1["area_normalized_enrichment"], 4 / 3)
+        self.assertEqual(target_1["attention_mass"], target_1["all_token_attention_share"])
+
     def test_transformers5_cached_step_keeps_single_token_query(self):
         inputs = Inputs(
             input_ids=torch.tensor([[9, 8, 7, 6, 5]]),

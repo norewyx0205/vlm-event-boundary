@@ -440,18 +440,62 @@ For every inspected evaluation row it writes:
 
 - a decision-position attention overlay on representative source frames
 - a temporal attention profile with event and boundary phases
-- a decoder-layer by ROI enrichment heatmap
+- a decoder-layer by ROI visual-normalised attention-mass heatmap
+- a decoder-layer by area-normalised ROI enrichment heatmap explicitly labelled
+  as not showing total attention
+- a layerwise Target 1/Target 2 contrast plot for `log(T1/T2)` mass and enrichment
 - an ROI-padding sensitivity plot
 - JSON metadata with the sampled grid, decision query, first answer token parity, spatial ROI mass,
   temporal phase mass, and per-layer ROI profiles
 
-ROI enrichment is attention share divided by token-area share, which prevents a
-large background region from looking important merely because it contains more
-tokens. Merged cells are assigned fractionally by rasterized overlap with each
-ROI; legacy center-point assignment remains available through
-`--roi_assignment center`. Attention remains a qualitative association:
-interpret it together with matched perturbation effects, not as standalone
-causal evidence.
+Target columns are role-aware, for example `T1 - smallest / second mover /
+non-subject`, rather than displaying only the internal annotation ID. ROI
+enrichment is visual-normalised attention mass divided by effective token-area
+share. It measures attention density relative to ROI size, not total attention.
+Merged cells are assigned fractionally by rasterized overlap with each ROI;
+legacy center-point assignment remains available through `--roi_assignment
+center`. Attention remains a qualitative association: interpret it together
+with matched perturbation effects, not as standalone causal evidence.
+
+The probe retains the legacy metric keys and also writes explicit names:
+
+- `all_token_attention_share`
+- `visual_normalized_attention_mass`
+- `effective_token_area_share`
+- `mean_attention_per_effective_token`
+- `area_normalized_enrichment`
+
+Existing attention JSON files can be analysed without loading Qwen or using a
+GPU:
+
+```bash
+python scripts/analyze_attention_roi.py \
+  --input_path analysis/attention/l5_clear_small_many_attention.json \
+  --output_dir analysis/attention/l5_clear_small_many_metrics
+```
+
+The analysis writes `layer_roi_metrics.csv`, `layer_target_contrasts.csv`,
+`stage_target_contrasts.csv`, `attention_archive_audit.csv`, and `summary.json`.
+Contrasts are defined as:
+
+```text
+delta_mass       = log(T1 visual-normalised mass / T2 visual-normalised mass)
+delta_enrichment = log(T1 area-normalised enrichment / T2 area-normalised enrichment)
+delta_enrichment = delta_mass - log(T1 effective area / T2 effective area)
+```
+
+The preregistered Qwen3-VL layer stages are early `0-11`, middle `12-23`, and
+late `24-35`. Stage rows remain grouped by evaluation/base stimulus; layers are
+not treated as independent experimental samples. Multiple attention JSON files
+or complete output ZIP archives may be passed to `--input_path` to audit
+attention semantics, ROI assignment, padding, frame-group support, and metric
+schema before comparing runs. For example:
+
+```bash
+python scripts/analyze_attention_roi.py \
+  --input_path 0803_output.zip 0805_output.zip \
+  --output_dir analysis/attention/archive_audit
+```
 
 Across the behavioral experiments, `analyze_results.py` produces feature-level
 accuracy, strict mirrored-pair accuracy, the accuracy-strict gap `d`,

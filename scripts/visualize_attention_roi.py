@@ -1,10 +1,16 @@
 import argparse
 import json
+import math
 import re
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+try:
+    from .analyze_attention_roi import target_roles
+except ImportError:
+    from analyze_attention_roi import target_roles
 
 
 ROI_ORDER = (
@@ -109,6 +115,31 @@ def attention_semantic_label(result):
     if "decision" in semantics or result.get("decision_query"):
         return "Decision-position"
     return "Generated-answer-token"
+
+
+def roi_display_label(result, roi):
+    role = target_roles(result).get(roi)
+    if role:
+        return role["display_label"]
+    return ROI_LABELS.get(roi, roi.replace("_", " ").title())
+
+
+def roi_display_lines(result, roi):
+    role = target_roles(result).get(roi)
+    if not role:
+        return split_label(ROI_LABELS.get(roi, roi.replace("_", " ").title()))
+    return [
+        f"T{role['target_id']} - {role['semantic_label']}",
+        role["mover_role"],
+        role["subject_role"],
+    ]
+
+
+def roi_metric(metrics, explicit_name, legacy_name):
+    value = metrics.get(explicit_name)
+    if value is None:
+        value = metrics.get(legacy_name)
+    return float(value or 0.0)
 
 
 def choose_temporal_indices(result, max_frames):
@@ -287,7 +318,11 @@ def write_temporal_attention(result, output_path):
     return True
 
 
-def write_layer_roi_heatmap(result, output_path):
+def write_layer_roi_heatmap(
+    result,
+    output_path,
+    metric="enrichment",
+):
     profiles = result.get("layer_roi_profiles") or []
     if not profiles:
         return False
@@ -300,28 +335,46 @@ def write_layer_roi_heatmap(result, output_path):
     rois = [roi for roi in ROI_ORDER if roi in present]
     if not rois:
         return False
+    if metric == "visual_mass":
+        explicit_name = "visual_normalized_attention_mass"
+        legacy_name = "normalized_visual_attention"
+        maximum = 1.0
+        title = "Layer-wise visual-normalised ROI attention mass"
+        note = "Share of attention assigned to video tokens; ROI columns sum to 100%"
+        colorbar_labels = ((1.0, "100%"), (0.5, "50%"), (0.0, "0%"))
+    else:
+        explicit_name = "area_normalized_enrichment"
+        legacy_name = "enrichment"
+        maximum = 3.0
+        title = "Layer-wise area-normalised visual-attention enrichment"
+        note = "Not total attention; 1x = attention proportional to effective ROI token area"
+        colorbar_labels = ((1.0, "3x"), (1 / 3, "1x"), (0.0, "0x"))
     matrix = np.asarray(
         [
             [
-                float((profile.get("spatial_roi") or {}).get(roi, {}).get("enrichment") or 0.0)
+                roi_metric(
+                    (profile.get("spatial_roi") or {}).get(roi, {}),
+                    explicit_name,
+                    legacy_name,
+                )
                 for roi in rois
             ]
             for profile in profiles
         ],
         dtype=np.float32,
     )
-    clipped = np.clip(matrix, 0.0, 3.0) / 3.0
+    clipped = np.clip(matrix, 0.0, maximum) / maximum
     heat = cv2.applyColorMap(np.uint8(clipped * 255), cv2.COLORMAP_VIRIDIS)
 
     cell_w = max(120, min(170, 760 // max(1, len(rois))))
     cell_h = max(14, min(25, 520 // max(1, len(profiles))))
-    left, right, top, bottom = 115, 135, 108, 125
+    left, right, top, bottom = 115, 145, 126, 180
     width = left + cell_w * len(rois) + right
     height = top + cell_h * len(profiles) + bottom
     image = np.full((height, width, 3), 255, dtype=np.uint8)
     centered_text(
         image,
-        "Layer-wise ROI attention enrichment",
+        title,
         width // 2,
         34,
         scale=0.66,
@@ -335,6 +388,14 @@ def write_layer_roi_heatmap(result, output_path):
         scale=0.44,
         color=(75, 75, 75),
     )
+    centered_text(
+        image,
+        note,
+        width // 2,
+        86,
+        scale=0.40,
+        color=(75, 75, 75),
+    )
 
     heat = cv2.resize(heat, (cell_w * len(rois), cell_h * len(profiles)), interpolation=cv2.INTER_NEAREST)
     image[top : top + heat.shape[0], left : left + heat.shape[1]] = heat
@@ -343,9 +404,18 @@ def write_layer_roi_heatmap(result, output_path):
     colorbar = cv2.applyColorMap(colorbar, cv2.COLORMAP_VIRIDIS)
     colorbar = cv2.resize(colorbar, (18, heat.shape[0]), interpolation=cv2.INTER_NEAREST)
     image[top : top + heat.shape[0], colorbar_x : colorbar_x + 18] = colorbar
-    cv2.putText(image, "3x", (colorbar_x + 25, top + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (55, 55, 55), 1, cv2.LINE_AA)
-    cv2.putText(image, "1x", (colorbar_x + 25, top + round(heat.shape[0] * 2 / 3) + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (55, 55, 55), 1, cv2.LINE_AA)
-    cv2.putText(image, "0x", (colorbar_x + 25, top + heat.shape[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (55, 55, 55), 1, cv2.LINE_AA)
+    for fraction, label in colorbar_labels:
+        y = top + round((1.0 - fraction) * heat.shape[0])
+        cv2.putText(
+            image,
+            label,
+            (colorbar_x + 25, y + 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (55, 55, 55),
+            1,
+            cv2.LINE_AA,
+        )
     for idx, profile in enumerate(profiles):
         if idx % max(1, len(profiles) // 8) == 0 or idx == len(profiles) - 1:
             y = top + idx * cell_h + cell_h // 2 + 5
@@ -362,9 +432,98 @@ def write_layer_roi_heatmap(result, output_path):
     cv2.putText(image, "Layer", (18, top - 18), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (50, 50, 50), 1, cv2.LINE_AA)
     for idx, roi in enumerate(rois):
         center = left + idx * cell_w + cell_w // 2
-        for line_idx, line in enumerate(split_label(ROI_LABELS[roi])):
+        for line_idx, line in enumerate(roi_display_lines(result, roi)):
             centered_text(image, line, center, top + heat.shape[0] + 32 + line_idx * 22, scale=0.45)
-    centered_text(image, "Enrichment: observed attention / token-area share (clipped at 3x)", width // 2, height - 20, scale=0.48, color=(75, 75, 75))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), image)
+    return True
+
+
+def write_layer_target_contrasts(result, output_path):
+    profiles = result.get("layer_roi_profiles") or []
+    values = []
+    for profile in profiles:
+        spatial = profile.get("spatial_roi") or {}
+        target_1 = spatial.get("target_1")
+        target_2 = spatial.get("target_2")
+        if not target_1 or not target_2:
+            continue
+        mass_1 = roi_metric(
+            target_1,
+            "visual_normalized_attention_mass",
+            "normalized_visual_attention",
+        )
+        mass_2 = roi_metric(
+            target_2,
+            "visual_normalized_attention_mass",
+            "normalized_visual_attention",
+        )
+        enrichment_1 = roi_metric(
+            target_1,
+            "area_normalized_enrichment",
+            "enrichment",
+        )
+        enrichment_2 = roi_metric(
+            target_2,
+            "area_normalized_enrichment",
+            "enrichment",
+        )
+        values.append((
+            int(profile.get("layer", len(values))),
+            math.log((mass_1 + 1e-12) / (mass_2 + 1e-12)),
+            math.log((enrichment_1 + 1e-12) / (enrichment_2 + 1e-12)),
+        ))
+    if not values:
+        return False
+
+    width, height = 1350, 690
+    left, right, top, bottom = 100, 390, 135, 100
+    plot_w, plot_h = width - left - right, height - top - bottom
+    image = np.full((height, width, 3), 255, dtype=np.uint8)
+    centered_text(image, "Layer-wise Target 1 versus Target 2 attention contrasts", width // 2, 31, scale=0.67, thickness=2)
+    centered_text(image, attention_result_subtitle(result), width // 2, 58, scale=0.44, color=(75, 75, 75))
+    roles = target_roles(result)
+    role_text = " | ".join(
+        (roles.get(roi) or {}).get("display_label", ROI_LABELS[roi])
+        for roi in ("target_1", "target_2")
+    )
+    centered_text(image, role_text, width // 2, 84, scale=0.38, color=(75, 75, 75))
+    centered_text(image, "Positive values mean Target 1 > Target 2", width // 2, 109, scale=0.40, color=(75, 75, 75))
+
+    all_values = [item for _layer, mass, enrichment in values for item in (mass, enrichment)]
+    maximum = max(0.5, min(4.0, max(abs(item) for item in all_values) * 1.15))
+    for fraction in np.linspace(-1.0, 1.0, 5):
+        y = top + round((1.0 - (float(fraction) + 1.0) / 2.0) * plot_h)
+        cv2.line(image, (left, y), (left + plot_w, y), (218, 218, 218), 1)
+        cv2.putText(image, f"{maximum * fraction:+.1f}", (20, y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (55, 55, 55), 1, cv2.LINE_AA)
+    zero_y = top + plot_h // 2
+    cv2.line(image, (left, zero_y), (left + plot_w, zero_y), (80, 80, 80), 2)
+
+    colors = ((190, 115, 25), (40, 145, 55))
+    series = ([value[1] for value in values], [value[2] for value in values])
+    labels = ("Delta mass: log(T1/T2)", "Delta enrichment: log(T1/T2)")
+    for series_values, color, label in zip(series, colors, labels):
+        points = []
+        for index, value in enumerate(series_values):
+            x = left + round(index / max(1, len(values) - 1) * plot_w)
+            y = zero_y - round(np.clip(value / maximum, -1.0, 1.0) * plot_h / 2)
+            points.append((x, y))
+        for first, second in zip(points, points[1:]):
+            cv2.line(image, first, second, color, 3, cv2.LINE_AA)
+        for point in points:
+            cv2.circle(image, point, 3, color, -1, cv2.LINE_AA)
+        legend_y = top + labels.index(label) * 35
+        cv2.line(image, (left + plot_w + 28, legend_y), (left + plot_w + 58, legend_y), color, 3, cv2.LINE_AA)
+        cv2.putText(image, label, (left + plot_w + 68, legend_y + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.43, (45, 45, 45), 1, cv2.LINE_AA)
+
+    cv2.line(image, (left, top), (left, top + plot_h), (45, 45, 45), 2)
+    cv2.line(image, (left, top + plot_h), (left + plot_w, top + plot_h), (45, 45, 45), 2)
+    tick_indices = sorted(set(np.linspace(0, len(values) - 1, min(10, len(values)), dtype=int)))
+    for index in tick_indices:
+        x = left + round(index / max(1, len(values) - 1) * plot_w)
+        centered_text(image, str(values[index][0]), x, top + plot_h + 32, scale=0.43)
+    centered_text(image, "Decoder layer", left + plot_w // 2, height - 25, scale=0.55, thickness=2)
+    cv2.putText(image, "Log ratio", (16, top - 22), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (45, 45, 45), 1, cv2.LINE_AA)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(output_path), image)
     return True
@@ -442,6 +601,8 @@ def write_visualizations(results, output_dir, project_root=None, max_frames=6, a
             "attention_overlay": output_dir / f"{stem}_attention_overlay.png",
             "temporal_attention": output_dir / f"{stem}_temporal_attention.png",
             "layer_roi_enrichment": output_dir / f"{stem}_layer_roi_enrichment.png",
+            "layer_roi_attention_mass": output_dir / f"{stem}_layer_roi_attention_mass.png",
+            "layer_target_contrasts": output_dir / f"{stem}_layer_target_contrasts.png",
             "roi_padding_sensitivity": output_dir / f"{stem}_roi_padding_sensitivity.png",
         }
         if write_attention_overlay(result, paths["attention_overlay"], project_root, max_frames, alpha):
@@ -450,6 +611,14 @@ def write_visualizations(results, output_dir, project_root=None, max_frames=6, a
             written.append(str(paths["temporal_attention"]))
         if write_layer_roi_heatmap(result, paths["layer_roi_enrichment"]):
             written.append(str(paths["layer_roi_enrichment"]))
+        if write_layer_roi_heatmap(
+            result,
+            paths["layer_roi_attention_mass"],
+            metric="visual_mass",
+        ):
+            written.append(str(paths["layer_roi_attention_mass"]))
+        if write_layer_target_contrasts(result, paths["layer_target_contrasts"]):
+            written.append(str(paths["layer_target_contrasts"]))
         if write_padding_sensitivity(result, paths["roi_padding_sensitivity"]):
             written.append(str(paths["roi_padding_sensitivity"]))
     return written
