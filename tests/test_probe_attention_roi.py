@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -90,6 +93,30 @@ class FakeTransformers5Model:
 
 
 class AttentionCacheTest(unittest.TestCase):
+    def test_resume_outputs_are_validated_and_indexed(self):
+        selected = [{"eval_id": "row_1"}, {"eval_id": "row_2"}]
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "attention.json"
+            output_path.write_text(
+                json.dumps([{"eval_id": "row_1", "prediction": "A"}]),
+                encoding="utf-8",
+            )
+            completed = probe.load_resume_outputs(output_path, selected)
+
+        self.assertEqual(set(completed), {"row_1"})
+        self.assertEqual(completed["row_1"]["prediction"], "A")
+
+    def test_atomic_output_checkpoint_can_be_resumed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "attention.json"
+            probe.write_output_checkpoint(output_path, [{"eval_id": "row_1"}])
+            completed = probe.load_resume_outputs(
+                output_path,
+                [{"eval_id": "row_1"}],
+            )
+
+        self.assertEqual(set(completed), {"row_1"})
+
     def test_phase1_selection_metadata_is_preserved_for_probe_output(self):
         row = {
             "attention_case_label": "matched_feature_calibration",

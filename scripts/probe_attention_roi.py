@@ -1185,11 +1185,50 @@ def select_probe_rows(rows, max_samples):
     return selected
 
 
+def load_resume_outputs(output_path, selected_rows):
+    if not output_path.is_file():
+        return {}
+    try:
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not read resumable attention output: {output_path}") from exc
+    if not isinstance(payload, list):
+        raise ValueError(f"Resumable attention output must be a JSON array: {output_path}")
+
+    selected_ids = {row.get("eval_id") for row in selected_rows}
+    completed = {}
+    for row in payload:
+        eval_id = row.get("eval_id")
+        if not eval_id or eval_id not in selected_ids:
+            raise ValueError(
+                "Resumable attention output contains an eval_id outside the current "
+                f"selection: {eval_id}"
+            )
+        if eval_id in completed:
+            raise ValueError(f"Duplicate eval_id in resumable attention output: {eval_id}")
+        completed[eval_id] = row
+    return completed
+
+
+def write_output_checkpoint(output_path, outputs):
+    temporary_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
+    temporary_path.write_text(
+        json.dumps(outputs, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(output_path)
+
+
 def main():
     wall_start = time.perf_counter()
     parser = argparse.ArgumentParser()
     parser.add_argument("--annotation_path", required=True)
     parser.add_argument("--output_path", required=True)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse completed eval_ids from an existing output JSON and checkpoint each new row.",
+    )
     parser.add_argument("--visualization_dir", default=None)
     parser.add_argument("--model_name", default="Qwen/Qwen3-VL-8B-Instruct")
     parser.add_argument("--model_revision", default=None)
@@ -1313,11 +1352,23 @@ def main():
         if args.visualization_dir
         else output_path.parent / f"{output_path.stem}_figures"
     )
-    for stale_path in (output_path, summary_path, config_path):
+    completed_outputs = load_resume_outputs(output_path, rows) if args.resume else {}
+    stale_paths = (summary_path, config_path) if args.resume else (
+        output_path,
+        summary_path,
+        config_path,
+    )
+    for stale_path in stale_paths:
         stale_path.unlink(missing_ok=True)
+    output_path.with_suffix(f"{output_path.suffix}.tmp").unlink(missing_ok=True)
     if args.plots and visualization_dir.is_dir():
         for stale_figure in visualization_dir.glob("*.png"):
             stale_figure.unlink()
+    if completed_outputs:
+        print(
+            f"Resuming from {len(completed_outputs)}/{len(rows)} completed attention rows.",
+            flush=True,
+        )
     print(
         f"Loading {args.model_name} with attention implementation "
         f"{args.attn_implementation}...",
@@ -1332,16 +1383,21 @@ def main():
     model_load_time_sec = time.perf_counter() - model_load_start
     outputs = []
     for idx, row in enumerate(rows, start=1):
+        eval_id = row.get("eval_id")
+        if eval_id in completed_outputs:
+            print(
+                f"Attention probe {idx}/{len(rows)}: {eval_id} [checkpoint]",
+                flush=True,
+            )
+            outputs.append(completed_outputs[eval_id])
+            continue
         print(f"Attention probe {idx}/{len(rows)}: {row.get('eval_id')}", flush=True)
         row_start = time.perf_counter()
         try:
             output = probe_row(model, processor, row, args)
             output["probe_runtime_sec"] = time.perf_counter() - row_start
             outputs.append(output)
-            output_path.write_text(
-                json.dumps(outputs, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            write_output_checkpoint(output_path, outputs)
         except Exception:
             print(
                 f"Attention probe failed at {row.get('eval_id')}. Full traceback:",
@@ -1350,7 +1406,7 @@ def main():
             traceback.print_exc()
             raise
 
-    output_path.write_text(json.dumps(outputs, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_output_checkpoint(output_path, outputs)
     archived_matches = [row.get("prediction_match") for row in outputs if row.get("prediction_match") is not None]
     logit_differences = [
         (row.get("decision_query") or {}).get("standard_logits_max_abs_diff")
@@ -1379,6 +1435,12 @@ def main():
         for row in outputs
     ]
     standard_logits_matches = [value for value in standard_logits_matches if value is not None]
+    applied_parity_atols = sorted({
+        (row.get("decision_query") or {}).get("standard_logits_parity_atol")
+        for row in outputs
+        if (row.get("decision_query") or {}).get("standard_logits_parity_atol")
+        is not None
+    })
     parity_summary = {
         "attention_semantics": "prompt_final_position_attention_predicting_first_answer_token",
         "attention_metric_schema": ATTENTION_METRIC_SCHEMA,
@@ -1387,6 +1449,9 @@ def main():
         "standard_first_token_matches": sum(int(value) for value in standard_token_matches),
         "standard_logits_rows": len(standard_logits_matches),
         "standard_logits_allclose": sum(int(value) for value in standard_logits_matches),
+        "standard_logits_parity_rtol_requested": args.parity_rtol,
+        "standard_logits_parity_atol_requested": args.parity_atol,
+        "standard_logits_parity_atol_values_in_rows": applied_parity_atols,
         "maximum_standard_logits_absolute_difference": max(logit_differences, default=None),
         "mean_standard_logits_mean_absolute_difference": (
             sum(mean_logit_differences) / len(mean_logit_differences)
@@ -1399,6 +1464,8 @@ def main():
         "case_labels": dict(
             Counter(row.get("attention_case_label") or "unlabelled" for row in outputs)
         ),
+        "resumed_rows": len(completed_outputs),
+        "newly_probed_rows": len(outputs) - len(completed_outputs),
         "model_load_time_sec": model_load_time_sec,
         "probe_rows_time_sec": sum(row["probe_runtime_sec"] for row in outputs),
         "mean_probe_time_sec": (

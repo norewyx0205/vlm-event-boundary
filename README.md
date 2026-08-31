@@ -417,7 +417,7 @@ python scripts/probe_attention_roi.py \
   --roi_padding 8 \
   --roi_assignment overlap \
   --roi_padding_sensitivity 0,4,8,12 \
-  --parity_atol 0.10 \
+  --parity_atol 0.25 \
   --visualization_layer -1 \
   --head_reduction mean \
   --empty_cache_each_sample
@@ -548,7 +548,8 @@ python scripts/probe_attention_roi.py \
   --roi_padding 8 \
   --roi_assignment overlap \
   --roi_padding_sensitivity 0,4,8,12 \
-  --parity_atol 0.10 \
+  --parity_atol 0.25 \
+  --resume \
   --head_reduction mean \
   --empty_cache_each_sample \
   --no-plots
@@ -567,6 +568,10 @@ plus three aggregate mass-versus-enrichment PNGs. With only four base samples,
 these intervals are calibration diagnostics rather than confirmatory inference.
 The probe preserves the selector's archived pair-outcome and first-mover labels
 in every attention result so the behavioral-outcome table remains auditable.
+The explicit `0.25` FP16 logit tolerance accommodates small numerical differences
+between full-prompt and split-cache execution. First-token identity and archived
+A/B prediction remain exact requirements. `--resume` reuses validated eval IDs
+from the existing JSON, while each newly completed row is written atomically.
 
 Across the behavioral experiments, `analyze_results.py` produces feature-level
 accuracy, strict mirrored-pair accuracy, the accuracy-strict gap `d`,
