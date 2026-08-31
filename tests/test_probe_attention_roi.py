@@ -93,6 +93,17 @@ class FakeTransformers5Model:
 
 
 class AttentionCacheTest(unittest.TestCase):
+    def test_compact_progress_logging_keeps_first_intervals_and_last(self):
+        logged = [
+            index
+            for index in range(1, 129)
+            if probe.should_log_progress(index, 128, 8)
+        ]
+
+        self.assertEqual(logged[:3], [1, 8, 16])
+        self.assertEqual(logged[-1], 128)
+        self.assertNotIn(7, logged)
+
     def test_transformers_version_guard_fails_before_expensive_probe(self):
         self.assertEqual(
             probe.validate_transformers_version(probe.transformers.__version__),

@@ -1280,6 +1280,10 @@ def quarantine_incompatible_output(output_path):
     return quarantine_path
 
 
+def should_log_progress(index, total, log_every):
+    return index == 1 or index == total or index % log_every == 0
+
+
 def main():
     wall_start = time.perf_counter()
     parser = argparse.ArgumentParser()
@@ -1385,11 +1389,34 @@ def main():
     parser.add_argument("--heatmap_alpha", type=float, default=0.45)
     parser.add_argument("--plots", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--empty_cache_each_sample", action="store_true")
+    parser.add_argument(
+        "--log_every",
+        type=int,
+        default=8,
+        help="Print compact progress every N selected rows, plus the first and last row.",
+    )
+    parser.add_argument(
+        "--model_loading_progress",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Show the verbose Transformers model-weight loading progress bar.",
+    )
+    parser.add_argument(
+        "--verbose_failures",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Print complete row-failure tracebacks to the console. Tracebacks are "
+            "always preserved in the error manifest."
+        ),
+    )
     args = parser.parse_args()
     if args.video_fps is not None and args.video_num_frames is not None:
         parser.error("Use only one temporal sampling control: --video_fps or --video_num_frames.")
     if args.max_samples <= 0 or args.max_new_tokens <= 0:
         parser.error("--max_samples and --max_new_tokens must be positive.")
+    if args.log_every <= 0:
+        parser.error("--log_every must be positive.")
     if args.roi_padding < 0:
         parser.error("--roi_padding must be non-negative.")
     if args.parity_rtol < 0 or args.parity_atol < 0:
@@ -1458,6 +1485,7 @@ def main():
     runtime_fingerprint = probe_runtime_fingerprint(args)
     completed_outputs = {}
     quarantined_output = None
+    quarantined_reason = None
     if args.resume:
         try:
             completed_outputs = load_resume_outputs(
@@ -1467,9 +1495,10 @@ def main():
             )
         except ValueError as exc:
             quarantined_output = quarantine_incompatible_output(output_path)
+            quarantined_reason = str(exc)
             print(
-                f"Resume checkpoint was incompatible and has been preserved at "
-                f"{quarantined_output}: {exc}",
+                "Previous attention checkpoint did not match the current selection "
+                f"or runtime. Preserved it at {quarantined_output}; starting clean.",
                 flush=True,
             )
     stale_paths = (summary_path, config_path, errors_path) if args.resume else (
@@ -1494,6 +1523,8 @@ def main():
         f"{args.attn_implementation}...",
         flush=True,
     )
+    if not args.model_loading_progress:
+        transformers.utils.logging.disable_progress_bar()
     model_load_start = time.perf_counter()
     model, processor = load_model(
         args.model_name,
@@ -1506,13 +1537,21 @@ def main():
     for idx, row in enumerate(rows, start=1):
         eval_id = row.get("eval_id")
         if eval_id in completed_outputs:
-            print(
-                f"Attention probe {idx}/{len(rows)}: {eval_id} [checkpoint]",
-                flush=True,
-            )
+            if should_log_progress(idx, len(rows), args.log_every):
+                print(
+                    f"Attention progress {idx}/{len(rows)} | "
+                    f"completed={len(outputs)} | failures={len(failures)} | "
+                    f"checkpoint={eval_id}",
+                    flush=True,
+                )
             outputs.append(completed_outputs[eval_id])
             continue
-        print(f"Attention probe {idx}/{len(rows)}: {row.get('eval_id')}", flush=True)
+        if should_log_progress(idx, len(rows), args.log_every):
+            print(
+                f"Attention progress {idx}/{len(rows)} | completed={len(outputs)} | "
+                f"failures={len(failures)} | current={eval_id}",
+                flush=True,
+            )
         row_start = time.perf_counter()
         try:
             output = probe_row(model, processor, row, args)
@@ -1535,15 +1574,17 @@ def main():
             failures.append(failure)
             write_output_checkpoint(errors_path, failures)
             print(
-                f"Attention probe failed at {row.get('eval_id')}. Full traceback:",
+                f"Isolated attention failure {idx}/{len(rows)}: {eval_id} | "
+                f"{type(exc).__name__}: {exc}",
                 flush=True,
             )
-            traceback.print_exc()
+            if args.verbose_failures or not args.continue_on_error:
+                traceback.print_exc()
             if not args.continue_on_error:
                 raise
             print(
-                "Continuing after isolated row failure; completed outputs remain "
-                f"checkpointed in {output_path}.",
+                f"Continuing; full traceback saved in {errors_path} and completed "
+                f"rows remain checkpointed in {output_path}.",
                 flush=True,
             )
             if args.empty_cache_each_sample and torch.cuda.is_available():
@@ -1623,6 +1664,7 @@ def main():
         "quarantined_resume_output": (
             str(quarantined_output) if quarantined_output else None
         ),
+        "quarantined_resume_reason": quarantined_reason,
         "model_load_time_sec": model_load_time_sec,
         "probe_rows_time_sec": sum(row["probe_runtime_sec"] for row in outputs),
         "mean_probe_time_sec": (

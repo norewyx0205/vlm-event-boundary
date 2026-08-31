@@ -485,6 +485,11 @@ python scripts/analyze_attention_roi.py \
   --output_dir analysis/attention/l5_clear_small_many_metrics
 ```
 
+When discovering results inside a directory or ZIP archive, the analyzer
+excludes `*_incompatible_*.json` checkpoints and `*_errors.json` manifests by
+default. Pass an exact JSON path only when intentionally auditing a quarantined
+technical pilot.
+
 The analysis writes `layer_roi_metrics.csv`, `layer_target_contrasts.csv`,
 `stage_target_contrasts.csv`, `paired_stage_target_contrasts.csv`,
 `attention_archive_audit.csv`, and `summary.json`.
@@ -560,6 +565,9 @@ python scripts/probe_attention_roi.py \
   --minimum_standard_logits_cosine_similarity 0.999 \
   --resume \
   --continue_on_error \
+  --log_every 8 \
+  --no-model_loading_progress \
+  --no-verbose_failures \
   --head_reduction mean \
   --empty_cache_each_sample \
   --no-plots
@@ -585,6 +593,13 @@ from the existing JSON, while each newly completed row is written atomically.
 With `--continue_on_error`, a genuinely invalid row is isolated in
 `*_errors.json` and the remaining expensive probes continue. Paired feature
 summaries automatically exclude incomplete original/swapped pairs.
+Console output is intentionally compact: `--log_every 8` reports periodic
+progress, model-weight bars are hidden unless `--model_loading_progress` is
+passed, and isolated failures print a one-line summary. Their complete
+tracebacks are still preserved in `*_errors.json`; use `--verbose_failures`
+only for interactive debugging. An incompatible resume checkpoint is retained
+as `*_incompatible_<timestamp>.json`, with the detailed reason recorded in the
+probe summary, before a clean run starts.
 
 Across the behavioral experiments, `analyze_results.py` produces feature-level
 accuracy, strict mirrored-pair accuracy, the accuracy-strict gap `d`,

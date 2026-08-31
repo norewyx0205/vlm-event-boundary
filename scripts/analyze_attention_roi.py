@@ -50,6 +50,11 @@ def read_attention_results(path):
             for member in sorted(archive.namelist()):
                 if not member.endswith(".json") or member.endswith("_config.json"):
                     continue
+                member_name = Path(member).name
+                if "_incompatible_" in member_name or member_name.endswith(
+                    "_errors.json"
+                ):
+                    continue
                 try:
                     payload = json.loads(archive.read(member).decode("utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError, KeyError):
@@ -65,10 +70,16 @@ def read_attention_results(path):
                 rows.extend((source, row) for row in payload)
                 sources.append(source)
         return rows, sources
-    files = [path] if path.is_file() else sorted(path.rglob("*.json"))
+    explicit_file = path.is_file()
+    files = [path] if explicit_file else sorted(path.rglob("*.json"))
     rows = []
     sources = []
     for input_file in files:
+        if not explicit_file and (
+            "_incompatible_" in input_file.name
+            or input_file.name.endswith("_errors.json")
+        ):
+            continue
         try:
             payload = json.loads(input_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
@@ -554,6 +565,13 @@ def lookup_summary(rows, filters, metric):
     return None
 
 
+def lookup_summary_count(rows, filters):
+    for row in rows:
+        if all(str(row.get(key)) == str(value) for key, value in filters.items()):
+            return int(row.get("n_rows") or 0)
+    return 0
+
+
 def contrast_limit(rows, metrics):
     values = []
     for row in rows:
@@ -763,6 +781,14 @@ def write_feature_contrast_heatmaps(rows, grouping_key, preferred_columns, title
                         },
                         metric,
                     )
+                    item_count = lookup_summary_count(
+                        rows,
+                        {
+                            "feature_variant": feature,
+                            grouping_key: column,
+                            "layer_stage": stage,
+                        },
+                    )
                     value = item[0] if item is not None else 0.0
                     cv2.rectangle(image, (x1, y1), (x2, y2), diverging_color(value, limit), -1)
                     cv2.rectangle(image, (x1, y1), (x2, y2), (255, 255, 255), 1)
@@ -770,11 +796,21 @@ def write_feature_contrast_heatmaps(rows, grouping_key, preferred_columns, title
                         image,
                         f"{value:+.2f}" if item is not None else "NA",
                         (x1 + x2) // 2,
-                        round((y1 + y2) / 2) + 6,
+                        round((y1 + y2) / 2) - 2,
                         scale=0.43,
                         color=(25, 25, 25),
                         thickness=1,
                     )
+                    if item is not None:
+                        centered_text(
+                            image,
+                            f"n={item_count}",
+                            (x1 + x2) // 2,
+                            round((y1 + y2) / 2) + 18,
+                            scale=0.30,
+                            color=(90, 90, 90),
+                            thickness=1,
+                        )
             for column_index, column in enumerate(columns):
                 x1 = round(grid_left + column_index * cell_width)
                 x2 = round(grid_left + (column_index + 1) * cell_width)

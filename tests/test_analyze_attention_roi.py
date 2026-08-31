@@ -144,6 +144,25 @@ class AttentionAnalysisTest(unittest.TestCase):
         self.assertEqual(len(sources), 1)
         self.assertIn("probe.json", sources[0])
 
+    def test_zip_discovery_excludes_quarantined_attention_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive_path = Path(directory) / "output.zip"
+            with zipfile.ZipFile(archive_path, "w") as archive:
+                archive.writestr(
+                    "analysis/attention/probe.json",
+                    json.dumps([result_fixture()]),
+                )
+                archive.writestr(
+                    "analysis/attention/probe_incompatible_20260901_000000.json",
+                    json.dumps([result_fixture()]),
+                )
+
+            rows, sources = analysis.read_attention_results(archive_path)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(len(sources), 1)
+        self.assertNotIn("incompatible", sources[0])
+
     def test_roles_include_semantics_mover_and_prompt_subject(self):
         roles = analysis.target_roles(result_fixture())
 
@@ -254,6 +273,24 @@ class AttentionAnalysisTest(unittest.TestCase):
 
         self.assertEqual(tables["feature_stage_summary"], [])
         self.assertEqual(tables["feature_pair_outcome_stage_summary"], [])
+
+    def test_heatmap_summary_count_uses_complete_pair_rows(self):
+        rows = [{
+            "feature_variant": "color_only",
+            "condition": "temporal_boundary",
+            "layer_stage": "middle",
+            "n_rows": 3,
+        }]
+        count = analysis.lookup_summary_count(
+            rows,
+            {
+                "feature_variant": "color_only",
+                "condition": "temporal_boundary",
+                "layer_stage": "middle",
+            },
+        )
+
+        self.assertEqual(count, 3)
 
 
 if __name__ == "__main__":
