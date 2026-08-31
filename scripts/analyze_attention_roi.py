@@ -476,7 +476,11 @@ def summarize_contrasts(rows, dimensions, seed=42):
 
 
 def feature_calibration_tables(stage_rows, paired_rows):
-    feature_rows = [row for row in paired_rows if row.get("feature_variant")]
+    feature_rows = [
+        row
+        for row in paired_rows
+        if row.get("feature_variant") and row.get("mirrored_pair_complete")
+    ]
     prompt_rows = [row for row in stage_rows if row.get("feature_variant")]
     return {
         "feature_stage_summary": summarize_contrasts(

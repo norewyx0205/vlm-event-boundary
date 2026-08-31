@@ -93,6 +93,14 @@ class FakeTransformers5Model:
 
 
 class AttentionCacheTest(unittest.TestCase):
+    def test_transformers_version_guard_fails_before_expensive_probe(self):
+        self.assertEqual(
+            probe.validate_transformers_version(probe.transformers.__version__),
+            probe.transformers.__version__,
+        )
+        with self.assertRaisesRegex(RuntimeError, "runtime version mismatch"):
+            probe.validate_transformers_version("0.0.invalid")
+
     def test_resume_outputs_are_validated_and_indexed(self):
         selected = [{"eval_id": "row_1"}, {"eval_id": "row_2"}]
         with tempfile.TemporaryDirectory() as directory:
@@ -116,6 +124,31 @@ class AttentionCacheTest(unittest.TestCase):
             )
 
         self.assertEqual(set(completed), {"row_1"})
+
+    def test_resume_rejects_runtime_mixing_and_preserves_checkpoint(self):
+        selected = [{"eval_id": "row_1"}]
+        expected_runtime = {"transformers_version": "5.9.0"}
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "attention.json"
+            output_path.write_text(
+                json.dumps([{
+                    "eval_id": "row_1",
+                    "probe_runtime_fingerprint": {
+                        "transformers_version": "5.15.1"
+                    },
+                }]),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "incompatible runtime"):
+                probe.load_resume_outputs(
+                    output_path,
+                    selected,
+                    expected_runtime=expected_runtime,
+                )
+            quarantine_path = probe.quarantine_incompatible_output(output_path)
+
+            self.assertFalse(output_path.exists())
+            self.assertTrue(quarantine_path.is_file())
 
     def test_phase1_selection_metadata_is_preserved_for_probe_output(self):
         row = {

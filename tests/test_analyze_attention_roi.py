@@ -243,6 +243,18 @@ class AttentionAnalysisTest(unittest.TestCase):
             4.0,
         )
 
+    def test_incomplete_mirrored_pairs_are_excluded_from_paired_feature_tables(self):
+        row = {
+            "feature_variant": "full",
+            "mirrored_pair_complete": False,
+            "layer_stage": "early",
+            "base_sample_id": 1,
+        }
+        tables = analysis.feature_calibration_tables([], [row])
+
+        self.assertEqual(tables["feature_stage_summary"], [])
+        self.assertEqual(tables["feature_pair_outcome_stage_summary"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

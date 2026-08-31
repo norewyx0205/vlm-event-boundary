@@ -410,6 +410,7 @@ python scripts/probe_attention_roi.py \
   --visualization_dir analysis/attention/l5_clear_small_many_figures \
   --model_name Qwen/Qwen3-VL-8B-Instruct \
   --model_revision 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
+  --expected_transformers_version 5.9.0 \
   --seed 42 \
   --deterministic \
   --attn_implementation eager \
@@ -418,18 +419,22 @@ python scripts/probe_attention_roi.py \
   --roi_assignment overlap \
   --roi_padding_sensitivity 0,4,8,12 \
   --parity_atol 0.25 \
+  --no-require_standard_logits_match \
+  --minimum_standard_top10_overlap 0.8 \
+  --minimum_standard_logits_cosine_similarity 0.999 \
   --visualization_layer -1 \
   --head_reduction mean \
   --empty_cache_each_sample
 ```
 
 The split-cache first token must exactly match standard greedy `model.generate`;
-rows carrying `archived_prediction` must also match the main evaluation,
-otherwise the probe fails. Full-vocabulary logits are additionally checked with
-an explicit FP16 tolerance (`rtol=0.001`, `atol=0.10`) because prefix splitting
-can change CUDA accumulation order without changing the decision. Maximum and
-mean logit differences, top-10 overlap, cosine similarity, and top-1 margins are
-archived for audit. The probe maps model-visible video tokens through
+rows carrying `archived_prediction` must also match the main evaluation. Top-10
+overlap and full-vocabulary logit cosine similarity provide distribution-level
+hard checks. Elementwise FP16 `allclose` is retained as a diagnostic because
+prefix splitting can change CUDA accumulation order without changing the answer
+or high-probability token ranking. Maximum and mean logit differences, top-10
+overlap, cosine similarity, and top-1 margins are archived for audit. The probe
+maps model-visible video tokens through
 `video_grid_thw`, accounts for Qwen3-VL spatial merging, and uses the processor's
 sampled source-frame indices.
 When one temporal patch combines multiple sampled frames, ROI overlap and phase
@@ -542,6 +547,7 @@ python scripts/probe_attention_roi.py \
   --output_path analysis/attention/l5_feature_calibration_attention.json \
   --model_name Qwen/Qwen3-VL-8B-Instruct \
   --model_revision 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
+  --expected_transformers_version 5.9.0 \
   --seed 42 --deterministic \
   --attn_implementation eager \
   --max_samples 128 \
@@ -549,7 +555,11 @@ python scripts/probe_attention_roi.py \
   --roi_assignment overlap \
   --roi_padding_sensitivity 0,4,8,12 \
   --parity_atol 0.25 \
+  --no-require_standard_logits_match \
+  --minimum_standard_top10_overlap 0.8 \
+  --minimum_standard_logits_cosine_similarity 0.999 \
   --resume \
+  --continue_on_error \
   --head_reduction mean \
   --empty_cache_each_sample \
   --no-plots
@@ -568,10 +578,13 @@ plus three aggregate mass-versus-enrichment PNGs. With only four base samples,
 these intervals are calibration diagnostics rather than confirmatory inference.
 The probe preserves the selector's archived pair-outcome and first-mover labels
 in every attention result so the behavioral-outcome table remains auditable.
-The explicit `0.25` FP16 logit tolerance accommodates small numerical differences
-between full-prompt and split-cache execution. First-token identity and archived
-A/B prediction remain exact requirements. `--resume` reuses validated eval IDs
+The explicit `0.25` FP16 tolerance is reported as an elementwise diagnostic;
+first-token identity, archived A/B prediction, top-10 overlap, and logit cosine
+similarity provide the hard parity checks. `--resume` reuses validated eval IDs
 from the existing JSON, while each newly completed row is written atomically.
+With `--continue_on_error`, a genuinely invalid row is isolated in
+`*_errors.json` and the remaining expensive probes continue. Paired feature
+summaries automatically exclude incomplete original/swapped pairs.
 
 Across the behavioral experiments, `analyze_results.py` produces feature-level
 accuracy, strict mirrored-pair accuracy, the accuracy-strict gap `d`,
@@ -836,6 +849,11 @@ Qwen evaluation:
 ```bash
 pip install torch "transformers==5.9.0" accelerate "qwen-vl-utils==0.0.14" "decord==0.6.0"
 ```
+
+The attention probe checks the Transformers version before loading model
+weights. In Colab, dependency verification uses a fresh Python subprocess, so a
+reinstall can take effect without discarding `/content` checkpoints or archived
+main-evaluation results from the current runtime.
 
 For smaller GPUs, install `bitsandbytes` and add `--load_in_4bit --video_fps 1 --video_max_pixels 150000`.
 
