@@ -2,6 +2,7 @@ import argparse
 import inspect
 import json
 import math
+import time
 import traceback
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -1110,7 +1111,12 @@ def select_probe_rows(rows, max_samples):
         selected = []
         grouped_cases = defaultdict(list)
         for row in rows:
-            key = row.get("pairing_id") or row.get("video_id") or row.get("eval_id")
+            key = (
+                row.get("attention_pairing_id")
+                or row.get("pairing_id")
+                or row.get("video_id")
+                or row.get("eval_id")
+            )
             grouped_cases[key].append(row)
         for group in grouped_cases.values():
             if len(selected) + len(group) > max_samples:
@@ -1119,7 +1125,12 @@ def select_probe_rows(rows, max_samples):
         return selected
     grouped = defaultdict(list)
     for row in rows:
-        key = row.get("pairing_id") or row.get("video_id") or row.get("eval_id")
+        key = (
+            row.get("attention_pairing_id")
+            or row.get("pairing_id")
+            or row.get("video_id")
+            or row.get("eval_id")
+        )
         grouped[key].append(row)
     condition_order = (
         "low_boundary",
@@ -1159,6 +1170,7 @@ def select_probe_rows(rows, max_samples):
 
 
 def main():
+    wall_start = time.perf_counter()
     parser = argparse.ArgumentParser()
     parser.add_argument("--annotation_path", required=True)
     parser.add_argument("--output_path", required=True)
@@ -1295,16 +1307,21 @@ def main():
         f"{args.attn_implementation}...",
         flush=True,
     )
+    model_load_start = time.perf_counter()
     model, processor = load_model(
         args.model_name,
         model_revision=args.model_revision,
         attn_implementation=args.attn_implementation,
     )
+    model_load_time_sec = time.perf_counter() - model_load_start
     outputs = []
     for idx, row in enumerate(rows, start=1):
         print(f"Attention probe {idx}/{len(rows)}: {row.get('eval_id')}", flush=True)
+        row_start = time.perf_counter()
         try:
-            outputs.append(probe_row(model, processor, row, args))
+            output = probe_row(model, processor, row, args)
+            output["probe_runtime_sec"] = time.perf_counter() - row_start
+            outputs.append(output)
             output_path.write_text(
                 json.dumps(outputs, ensure_ascii=False, indent=2),
                 encoding="utf-8",
@@ -1366,6 +1383,14 @@ def main():
         "case_labels": dict(
             Counter(row.get("attention_case_label") or "unlabelled" for row in outputs)
         ),
+        "model_load_time_sec": model_load_time_sec,
+        "probe_rows_time_sec": sum(row["probe_runtime_sec"] for row in outputs),
+        "mean_probe_time_sec": (
+            sum(row["probe_runtime_sec"] for row in outputs) / len(outputs)
+            if outputs
+            else None
+        ),
+        "total_wall_time_sec": time.perf_counter() - wall_start,
     }
     summary_path.write_text(
         json.dumps(parity_summary, ensure_ascii=False, indent=2),

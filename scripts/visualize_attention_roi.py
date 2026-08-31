@@ -57,9 +57,18 @@ def resolve_video_path(path, project_root=None):
     if path.exists():
         return path
     if project_root is not None:
-        candidate = Path(project_root) / path
+        project_root = Path(project_root)
+        candidate = project_root / path
         if candidate.exists():
             return candidate
+        if path.is_absolute():
+            for marker in ("data", "analysis", "results"):
+                if marker not in path.parts:
+                    continue
+                marker_index = path.parts.index(marker)
+                candidate = project_root.joinpath(*path.parts[marker_index:])
+                if candidate.exists():
+                    return candidate
     return path
 
 

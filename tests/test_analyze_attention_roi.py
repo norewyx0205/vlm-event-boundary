@@ -123,11 +123,18 @@ class AttentionAnalysisTest(unittest.TestCase):
         self.assertTrue(row["target_1_has_higher_enrichment"])
 
     def test_legacy_metrics_are_exported_with_explicit_names(self):
-        rows = analysis.flatten_roi_metrics(Path("attention.json"), result_fixture())
+        result = result_fixture()
+        result["head_reduction"] = "max"
+        result["layer_roi_profiles"][0]["spatial_roi"]["target_1"]["attention_mass"] = 0.91
+        rows = analysis.flatten_roi_metrics(Path("attention.json"), result)
         target_1 = next(row for row in rows if row["roi"] == "target_1")
 
         self.assertEqual(target_1["metric_schema"], "legacy_v1_aliases")
         self.assertAlmostEqual(target_1["all_token_attention_share"], 0.03)
+        self.assertEqual(
+            target_1["all_token_attention_share_source"],
+            "reconstructed_visual_fraction_x_visual_mass",
+        )
         self.assertAlmostEqual(target_1["visual_normalized_attention_mass"], 0.1)
         self.assertAlmostEqual(target_1["effective_token_area_share"], 0.05)
         self.assertAlmostEqual(target_1["area_normalized_enrichment"], 2.0)
@@ -144,6 +151,45 @@ class AttentionAnalysisTest(unittest.TestCase):
         legacy.pop("roi_padding")
         legacy_audit = analysis.archive_audit([(Path("legacy.json"), legacy)])
         self.assertFalse(legacy_audit[0]["measurement_metadata_complete"])
+
+    def test_mirrored_prompts_are_averaged_before_group_summary(self):
+        rows = []
+        for base_id, values in ((1, (1.0, 3.0)), (2, (5.0, 7.0))):
+            for variant, value in zip(("original", "swapped"), values):
+                rows.append({
+                    "source_attention_file": "attention.json",
+                    "eval_id": f"sample_{base_id}_{variant}",
+                    "video_id": f"sample_{base_id}.mp4",
+                    "base_sample_id": base_id,
+                    "feature_variant": "full",
+                    "size_scene_variant": None,
+                    "condition": "low_boundary",
+                    "prompt_variant": variant,
+                    "layer_stage": "early",
+                    "target_1_mover_role": "first mover" if base_id == 1 else "second mover",
+                    "mean_delta_log_visual_mass_t1_over_t2": value,
+                    "mean_log_area_ratio_t1_over_t2": 0.0,
+                    "mean_delta_log_enrichment_t1_over_t2": value,
+                    "mean_decomposition_residual": 0.0,
+                })
+
+        paired = analysis.paired_stage_contrasts(rows)
+        summary = analysis.summarize_contrasts(
+            paired,
+            ("feature_variant", "layer_stage"),
+        )
+
+        self.assertEqual(len(paired), 2)
+        self.assertTrue(all(row["mirrored_pair_complete"] for row in paired))
+        self.assertEqual(
+            [row["mean_delta_log_visual_mass_t1_over_t2"] for row in paired],
+            [2.0, 6.0],
+        )
+        self.assertEqual(summary[0]["n_base_samples"], 2)
+        self.assertEqual(
+            summary[0]["mean_delta_log_visual_mass_t1_over_t2_mean"],
+            4.0,
+        )
 
 
 if __name__ == "__main__":

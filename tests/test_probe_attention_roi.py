@@ -209,6 +209,26 @@ class AttentionCacheTest(unittest.TestCase):
             {"original", "swapped"},
         )
 
+    def test_attention_pairing_id_separates_matched_feature_pairs(self):
+        rows = []
+        for feature in ("full", "color_only"):
+            for variant in ("original", "swapped"):
+                rows.append({
+                    "eval_id": f"{feature}_{variant}",
+                    "pairing_id": "shared_source_pair",
+                    "attention_pairing_id": f"{feature}_pair",
+                    "attention_case_label": "matched_feature_calibration",
+                    "prompt_variant": variant,
+                })
+
+        selected = probe.select_probe_rows(rows, max_samples=2)
+
+        self.assertEqual(len(selected), 2)
+        self.assertEqual(
+            {row["attention_pairing_id"] for row in selected},
+            {"full_pair"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
