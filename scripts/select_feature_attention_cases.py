@@ -122,6 +122,31 @@ def matched_structure_signature(row):
     })
 
 
+def mirrored_video_signature(row):
+    return freeze({
+        "dataset_version": row.get("dataset_version"),
+        "difficulty_level": row.get("difficulty_level"),
+        "difficulty_name": row.get("difficulty_name"),
+        "feature_variant": row.get("feature_variant"),
+        "feature_encoding": row.get("feature_encoding"),
+        "condition": row.get("condition"),
+        "boundary_type": row.get("boundary_type"),
+        "base_sample_id": row.get("base_sample_id"),
+        "pairing_id": row.get("pairing_id"),
+        "video_id": row.get("video_id"),
+        "video_path": row.get("video_path"),
+        "fps": row.get("fps"),
+        "duration_sec": row.get("duration_sec"),
+        "total_frames": row.get("total_frames"),
+        "first_object_id": row.get("first_object_id"),
+        "second_object_id": row.get("second_object_id"),
+        "target_objects": row.get("target_objects"),
+        "distractors": row.get("distractors"),
+        "event_timing": row.get("event_timing"),
+        "boundary_timing": row.get("boundary_timing"),
+    })
+
+
 def annotation_index(annotation_rows, features, conditions):
     index = {}
     base_ids_by_feature = {}
@@ -153,9 +178,20 @@ def annotation_index(annotation_rows, features, conditions):
 
 
 def validate_matched_structures(index, base_ids, features, conditions):
-    checked = 0
+    cross_feature_checks = 0
+    mirrored_pair_checks = 0
     for base_id in base_ids:
         for condition in conditions:
+            for feature in features:
+                original = index[(feature, base_id, condition, "original")]
+                swapped = index[(feature, base_id, condition, "swapped")]
+                if mirrored_video_signature(original) != mirrored_video_signature(swapped):
+                    raise ValueError(
+                        "Mirrored prompts do not share identical video metadata for "
+                        f"feature={feature}, base_sample_id={base_id}, "
+                        f"condition={condition}."
+                    )
+                mirrored_pair_checks += 1
             signatures = {
                 feature: matched_structure_signature(
                     index[(feature, base_id, condition, "original")]
@@ -170,8 +206,11 @@ def validate_matched_structures(index, base_ids, features, conditions):
                         f"base_sample_id={base_id}, condition={condition}: "
                         f"{reference_feature} != {feature}"
                     )
-            checked += 1
-    return checked
+            cross_feature_checks += 1
+    return {
+        "cross_feature_condition_groups_checked": cross_feature_checks,
+        "mirrored_video_pairs_checked": mirrored_pair_checks,
+    }
 
 
 def result_index(rows, expected_eval_ids):
@@ -313,6 +352,8 @@ def aggregate_profiles(profiles):
 def build_manifest(annotation_by_key, archived_by_eval, profiles, features, conditions):
     output = []
     profile_by_id = {profile["base_sample_id"]: profile for profile in profiles}
+    bundle_pair_count = len(features) * len(conditions)
+    bundle_row_count = bundle_pair_count * len(PAIR_VARIANTS)
     for base_id in sorted(profile_by_id):
         profile = profile_by_id[base_id]
         bundle_id = f"matched_feature_calibration_base_{base_id:03d}"
@@ -326,7 +367,8 @@ def build_manifest(annotation_by_key, archived_by_eval, profiles, features, cond
                     row.update({
                         "attention_case_label": "matched_feature_calibration",
                         "attention_case_bundle_id": bundle_id,
-                        "attention_case_bundle_size": len(features) * len(conditions),
+                        "attention_case_bundle_pair_count": bundle_pair_count,
+                        "attention_case_bundle_row_count": bundle_row_count,
                         "attention_pairing_id": f"{feature}__{base_id:03d}__{condition}",
                         "attention_selection_first_mover": profile["first_mover"],
                         "attention_archived_pair_outcome": outcome,
@@ -357,7 +399,7 @@ def main():
 
     annotations = load_annotations(args.annotation_root, features)
     annotation_by_key, complete_base_ids = annotation_index(annotations, features, conditions)
-    structure_checks = validate_matched_structures(
+    structure_audit = validate_matched_structures(
         annotation_by_key, complete_base_ids, features, conditions
     )
     expected_eval_ids = {
@@ -388,7 +430,7 @@ def main():
     )
     write_jsonl(output_path, manifest)
     summary = {
-        "selection_schema": "matched_feature_calibration_v1",
+        "selection_schema": "matched_feature_calibration_v2",
         "annotation_root": str(args.annotation_root),
         "main_results": [str(path) for path in args.main_results],
         "feature_variants": list(features),
@@ -400,7 +442,13 @@ def main():
         "selected_base_sample_ids": [item["base_sample_id"] for item in selected],
         "selected_base_samples": selected,
         "selection_totals": aggregate_profiles(selected),
-        "structural_matches_checked": structure_checks,
+        "structural_validation": structure_audit,
+        "structural_matches_checked": structure_audit[
+            "cross_feature_condition_groups_checked"
+        ],
+        "mirrored_video_pairs_checked": structure_audit[
+            "mirrored_video_pairs_checked"
+        ],
         "evaluation_rows": len(manifest),
         "mirrored_video_pairs": len(manifest) // 2,
     }

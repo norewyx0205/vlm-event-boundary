@@ -90,6 +90,22 @@ class FakeTransformers5Model:
 
 
 class AttentionCacheTest(unittest.TestCase):
+    def test_phase1_selection_metadata_is_preserved_for_probe_output(self):
+        row = {
+            "attention_case_label": "matched_feature_calibration",
+            "attention_pairing_id": "full__001__low_boundary",
+            "attention_case_bundle_id": "matched_feature_calibration_base_001",
+            "attention_case_bundle_pair_count": 16,
+            "attention_case_bundle_row_count": 32,
+            "attention_archived_pair_outcome": "both_wrong",
+            "attention_selection_first_mover": "target_2_first",
+        }
+
+        metadata = probe.attention_case_metadata(row)
+
+        for key, value in row.items():
+            self.assertEqual(metadata[key], value)
+
     def test_attention_distribution_separates_mass_area_and_enrichment(self):
         scores = torch.tensor([0.2, 0.1])
         distribution = probe.attention_distribution(

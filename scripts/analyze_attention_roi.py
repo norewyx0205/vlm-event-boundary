@@ -199,6 +199,13 @@ def base_metadata(source_path, result):
         "is_correct": result.get("is_correct"),
         "attention_pairing_id": result.get("attention_pairing_id"),
         "attention_case_bundle_id": result.get("attention_case_bundle_id"),
+        "attention_case_bundle_size": result.get("attention_case_bundle_size"),
+        "attention_case_bundle_pair_count": result.get(
+            "attention_case_bundle_pair_count"
+        ),
+        "attention_case_bundle_row_count": result.get(
+            "attention_case_bundle_row_count"
+        ),
         "attention_archived_pair_outcome": result.get("attention_archived_pair_outcome"),
         "attention_selection_first_mover": result.get("attention_selection_first_mover"),
         "attention_semantics": result.get("attention_semantics"),

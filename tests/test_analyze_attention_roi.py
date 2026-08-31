@@ -1,3 +1,4 @@
+import copy
 import json
 import math
 import tempfile
@@ -73,6 +74,57 @@ def result_fixture():
 
 
 class AttentionAnalysisTest(unittest.TestCase):
+    def test_phase1_selection_metadata_reaches_analysis_rows(self):
+        result = result_fixture()
+        result.update({
+            "attention_pairing_id": "size_only__001__temporal_boundary",
+            "attention_case_bundle_id": "matched_feature_calibration_base_001",
+            "attention_case_bundle_pair_count": 16,
+            "attention_case_bundle_row_count": 32,
+            "attention_archived_pair_outcome": "position_sensitive",
+            "attention_selection_first_mover": "target_2_first",
+        })
+
+        metadata = analysis.base_metadata(Path("attention.json"), result)
+
+        self.assertEqual(
+            metadata["attention_archived_pair_outcome"],
+            "position_sensitive",
+        )
+        self.assertEqual(metadata["attention_case_bundle_pair_count"], 16)
+        self.assertEqual(metadata["attention_case_bundle_row_count"], 32)
+
+    def test_archived_pair_outcome_survives_feature_summary_pipeline(self):
+        layer_rows = []
+        for variant in ("original", "swapped"):
+            result = copy.deepcopy(result_fixture())
+            result.update({
+                "eval_id": f"sample_001_temporal_boundary_{variant}",
+                "video_id": "sample_001_temporal_boundary.mp4",
+                "feature_variant": "size_only",
+                "prompt_variant": variant,
+                "attention_pairing_id": "size_only__001__temporal_boundary",
+                "attention_archived_pair_outcome": "position_sensitive",
+            })
+            layer_rows.extend(
+                analysis.target_contrasts(Path("attention.json"), result)
+            )
+
+        stage_rows = analysis.stage_contrasts(layer_rows)
+        paired_rows = analysis.paired_stage_contrasts(stage_rows)
+        tables = analysis.feature_calibration_tables(stage_rows, paired_rows)
+        outcome_rows = tables["feature_pair_outcome_stage_summary"]
+
+        self.assertEqual(len(outcome_rows), 1)
+        self.assertEqual(
+            outcome_rows[0]["attention_archived_pair_outcome"],
+            "position_sensitive",
+        )
+        self.assertNotEqual(
+            outcome_rows[0]["attention_archived_pair_outcome"],
+            "None",
+        )
+
     def test_zip_archive_attention_json_is_discovered(self):
         with tempfile.TemporaryDirectory() as directory:
             archive_path = Path(directory) / "output.zip"

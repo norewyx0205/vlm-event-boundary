@@ -9,6 +9,7 @@ CONDITIONS = selector.DEFAULT_CONDITIONS
 
 def annotation(feature, base_id, condition, variant, target_1_first):
     starts = (10, 20) if target_1_first else (20, 10)
+    video_id = f"l5_{feature}_sample_{base_id:03d}_{condition}.mp4"
     return {
         "eval_id": f"l5_{feature}_sample_{base_id:03d}_{condition}_{variant}",
         "pairing_id": f"l5_feature_sample_{base_id:03d}_{condition}",
@@ -16,6 +17,8 @@ def annotation(feature, base_id, condition, variant, target_1_first):
         "base_sample_id": base_id,
         "condition": condition,
         "prompt_variant": variant,
+        "video_id": video_id,
+        "video_path": f"data/l5_feature_ablation_v1/{feature}/videos/{video_id}",
         "fps": 15,
         "duration_sec": 18,
         "total_frames": 270,
@@ -100,7 +103,7 @@ class MatchedFeatureCaseSelectionTest(unittest.TestCase):
     def test_builds_complete_matched_manifest(self):
         annotations, results = make_rows()
         index, base_ids = selector.annotation_index(annotations, FEATURES, CONDITIONS)
-        checked = selector.validate_matched_structures(index, base_ids, FEATURES, CONDITIONS)
+        audit = selector.validate_matched_structures(index, base_ids, FEATURES, CONDITIONS)
         expected_ids = {row["eval_id"] for rows in annotations.values() for row in rows}
         archived = selector.result_index(results, expected_ids)
         profiles = [
@@ -112,7 +115,8 @@ class MatchedFeatureCaseSelectionTest(unittest.TestCase):
             index, archived, selected, FEATURES, CONDITIONS
         )
 
-        self.assertEqual(checked, 16)
+        self.assertEqual(audit["cross_feature_condition_groups_checked"], 16)
+        self.assertEqual(audit["mirrored_video_pairs_checked"], 64)
         self.assertEqual(combinations, 1)
         self.assertEqual(score[0], 0)
         self.assertEqual(len(manifest), 128)
@@ -125,12 +129,38 @@ class MatchedFeatureCaseSelectionTest(unittest.TestCase):
             key = row["attention_pairing_id"]
             pair_counts[key] = pair_counts.get(key, 0) + 1
         self.assertEqual(set(pair_counts.values()), {2})
+        self.assertEqual(
+            {row["attention_case_bundle_pair_count"] for row in manifest},
+            {16},
+        )
+        self.assertEqual(
+            {row["attention_case_bundle_row_count"] for row in manifest},
+            {32},
+        )
+        self.assertTrue(
+            all("attention_case_bundle_size" not in row for row in manifest)
+        )
 
     def test_structure_validation_detects_trajectory_mismatch(self):
         annotations, _results = make_rows(base_ids=(1,))
-        annotations["size_only"][0]["target_objects"][0]["to"] = [99, 99]
+        for row in annotations["size_only"]:
+            if row["condition"] == "low_boundary":
+                row["target_objects"][0]["to"] = [99, 99]
         index, base_ids = selector.annotation_index(annotations, FEATURES, CONDITIONS)
         with self.assertRaisesRegex(ValueError, "not structurally matched"):
+            selector.validate_matched_structures(index, base_ids, FEATURES, CONDITIONS)
+
+    def test_structure_validation_detects_mirrored_video_mismatch(self):
+        annotations, _results = make_rows(base_ids=(1,))
+        swapped = next(
+            row
+            for row in annotations["full"]
+            if row["condition"] == "low_boundary"
+            and row["prompt_variant"] == "swapped"
+        )
+        swapped["video_path"] = "data/unexpected_duplicate.mp4"
+        index, base_ids = selector.annotation_index(annotations, FEATURES, CONDITIONS)
+        with self.assertRaisesRegex(ValueError, "Mirrored prompts"):
             selector.validate_matched_structures(index, base_ids, FEATURES, CONDITIONS)
 
 

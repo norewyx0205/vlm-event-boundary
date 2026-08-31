@@ -993,6 +993,22 @@ def greedy_generate_with_decision_attention(
     }
 
 
+ATTENTION_CASE_METADATA_FIELDS = (
+    "attention_case_label",
+    "attention_pairing_id",
+    "attention_case_bundle_id",
+    "attention_case_bundle_size",
+    "attention_case_bundle_pair_count",
+    "attention_case_bundle_row_count",
+    "attention_archived_pair_outcome",
+    "attention_selection_first_mover",
+)
+
+
+def attention_case_metadata(row):
+    return {field: row.get(field) for field in ATTENTION_CASE_METADATA_FIELDS}
+
+
 def probe_row(model, processor, row, args):
     video_path = PROJECT_ROOT / row["video_path"]
     if not video_path.exists():
@@ -1076,7 +1092,7 @@ def probe_row(model, processor, row, args):
         "archived_prediction": archived_prediction,
         "archived_is_correct": row.get("archived_is_correct"),
         "prediction_match": prediction_match,
-        "attention_case_label": row.get("attention_case_label"),
+        **attention_case_metadata(row),
         "raw_response": raw_response,
         "attention_semantics": query_metadata["attention_semantics"],
         "decision_query": query_metadata,
