@@ -43,6 +43,7 @@ vlm-event-boundary/
     README.md
   scripts/
     common.py
+    experiment_artifacts.py
     generate_ladder_dataset.py
     run_eval.py
     analyze_results.py
@@ -885,3 +886,46 @@ Use `notebooks/colab_eval.ipynb` for Colab. It contains cells for:
 - running baseline, synthetic, and ladder evaluations
 - running Qwen3-VL on each level
 - analyzing saved results
+
+### Artifact-first notebook modes
+
+The notebook is an experiment orchestrator rather than an unconditional
+`Run all` script. Its configuration cell resolves one mode for every independent
+experiment:
+
+- `skip`: do not run or consume the experiment.
+- `reuse`: validate and use existing real artifacts without recomputation.
+- `analyze`: reuse raw outputs and rebuild only CPU analysis and plots.
+- `run`: execute the real generation/evaluation/probe stage.
+
+The default `part1_reuse` profile never regenerates completed datasets or loads
+Qwen for completed Part 1, ROI, or Phase 1 experiments. The older standalone
+Phase 0 case study is skipped by default because its metric decomposition is
+already incorporated into Phase 1; set `attention_phase0=reuse` when its own
+archive has also been restored. Available
+profiles are `part1_reuse`, `analysis_only`, `full_reproduction`, and `smoke`.
+Override only the active experiment in the central configuration, for example:
+
+```python
+PIPELINE_PROFILE = "part1_reuse"
+EXPERIMENT_MODE_OVERRIDES = {
+    "attention_phase1": "analyze",
+}
+```
+
+For a genuine full rerun, select `full_reproduction`. `run` remains explicit so
+a missing artifact can never silently trigger an expensive model evaluation.
+
+Completed runs should be restored from the real timestamped ZIP produced by the
+final notebook cell. Exact paths can be listed in `ARTIFACT_ARCHIVES`; otherwise
+the notebook can discover the latest matching ZIP in `/content`. The archive
+manifest is checked against the configured model name and revision before safe
+extraction. Missing dependencies fail before model loading with a path-specific
+message. Archives marked `artifact_type=mock` are rejected from the research
+pipeline; mock data is reserved for unit tests and smoke fixtures.
+
+New archives record `artifact_type=real`, the pipeline profile, all experiment
+modes, restored archive provenance, and a stable configuration fingerprint.
+Notebook cell outputs are intentionally not versioned as evidence: raw results,
+summary JSON/CSV files, figures, configurations, and provenance remain in the
+timestamped artifact archive.
