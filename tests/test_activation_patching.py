@@ -22,6 +22,22 @@ class FakeTokenizer:
         return {"A": [1], "B": [2]}.get(text, [3])
 
 
+class CharacterOffsetTokenizer:
+    def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False):
+        del add_special_tokens
+        token_ids = [1000 + ord(character) for character in text]
+        payload = {"input_ids": token_ids}
+        if return_offsets_mapping:
+            payload["offset_mapping"] = [
+                (index, index + 1) for index in range(len(text))
+            ]
+        return payload
+
+    def encode(self, text, add_special_tokens=False):
+        del add_special_tokens
+        return [1000 + ord(character) for character in text]
+
+
 class FakeProcessor:
     tokenizer = FakeTokenizer()
 
@@ -87,6 +103,39 @@ def annotation(base_id, condition, variant, correct_option="A"):
 
 
 class ActivationPatchingTest(unittest.TestCase):
+    def test_contextual_option_locator_extracts_both_option_bodies(self):
+        tokenizer = CharacterOffsetTokenizer()
+        option_a = "The orange circle moves before the blue square."
+        option_b = "The orange circle moves after the blue square."
+        block = (
+            f"\n\nA: {option_a}\nB: {option_b}\n\n"
+            "Answer with only A or B."
+        )
+        prefix = "Prompt context"
+        suffix = "<assistant>"
+        input_ids = tokenizer.encode(prefix + block + suffix)
+
+        positions = core._option_positions(
+            tokenizer, input_ids, option_a, option_b
+        )
+        extracted = "".join(
+            chr(input_ids[position] - 1000) for position in positions
+        )
+
+        self.assertEqual(extracted, option_a + option_b)
+        self.assertNotIn("A:", extracted)
+        self.assertNotIn("Answer with only", extracted)
+
+    def test_required_text_groups_fail_fast_when_options_are_missing(self):
+        groups = {
+            "text_target_1_mentions": [1],
+            "text_target_2_mentions": [2],
+            "text_temporal_relations": [3],
+            "text_options": [],
+        }
+        with self.assertRaisesRegex(RuntimeError, "text_options"):
+            core.validate_required_text_groups(groups, {"eval_id": "sample"})
+
     def test_case_selection_enforces_rescue_and_stable_controls(self):
         annotations = []
         results = []
@@ -212,6 +261,46 @@ class ActivationPatchingTest(unittest.TestCase):
             row["patch_method_eligibility"] == "positionwise_replace"
             for row in selected
         ))
+
+    def test_candidate_selection_excludes_terminal_post_nondecision_tokens(self):
+        rows = []
+        for layer, group, score in (
+            (35, "roi_target_1", 100),
+            (35, "decision_position", 90),
+            (34, "text_options", 80),
+            (33, "text_temporal_relations", 70),
+            (20, "roi_target_2", 40),
+            (10, "phase_event_1", 1),
+        ):
+            rows.append({
+                "phase3_pair_id": "pair_a",
+                "status": "ok",
+                "layer": layer,
+                "token_group": group,
+                "cosine_distance": score,
+                "relative_l2": score,
+                "patch_method_eligibility": "positionwise_replace",
+                "residual_stream_location": core.RESIDUAL_STREAM_LOCATION,
+            })
+
+        ranked = candidates.rank_pair(rows)
+
+        self.assertNotIn(
+            (35, "roi_target_1"),
+            {(row["layer"], row["token_group"]) for row in ranked},
+        )
+        self.assertIn(
+            (35, "decision_position"),
+            {(row["layer"], row["token_group"]) for row in ranked},
+        )
+
+    def test_event_two_plot_label_marks_descriptive_only(self):
+        label = analysis.token_group_display_label("phase_event_2")
+        self.assertIn("descriptive only", label)
+        self.assertEqual(
+            analysis.token_group_display_label("phase_event_1"),
+            "phase_event_1",
+        )
 
     def test_residual_patch_and_identity_noop(self):
         model = FakeModel()

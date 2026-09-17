@@ -54,7 +54,7 @@ except ImportError:
     from run_eval import configure_reproducibility, environment_metadata, load_model
 
 
-PHASE3_SCHEMA = "temporal_boundary_activation_patching_v2_methodologically_stratified"
+PHASE3_SCHEMA = "temporal_boundary_activation_patching_v3_contextual_text_spans"
 DIRECTIONS = (
     ("temporal_to_low", "temporal_boundary", "low_boundary"),
     ("low_to_temporal", "low_boundary", "temporal_boundary"),

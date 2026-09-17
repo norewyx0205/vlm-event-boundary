@@ -165,6 +165,12 @@ def setup_plotting():
     return plt
 
 
+def token_group_display_label(group):
+    if group == "phase_event_2":
+        return "phase_event_2\n(non-position-aligned; descriptive only)"
+    return group
+
+
 def plot_divergence_by_layer(rows, output_path):
     plt = setup_plotting()
     valid = [row for row in rows if row.get("status") == "ok"]
@@ -188,6 +194,8 @@ def plot_divergence_by_layer(rows, output_path):
 
 def plot_divergence_by_group(rows, output_path):
     plt = setup_plotting()
+    from matplotlib.ticker import MaxNLocator, ScalarFormatter
+
     valid = [row for row in rows if row.get("status") == "ok"]
     groups = sorted({row["token_group"] for row in valid})
     cosine = [mean(row["cosine_distance"] for row in valid if row["token_group"] == group) for group in groups]
@@ -197,12 +205,19 @@ def plot_divergence_by_group(rows, output_path):
     axes[0].barh(y, cosine, color="#176B87")
     axes[1].barh(y, l2, color="#C47A1C")
     for axis, title in zip(axes, ("Cosine distance", "Relative L2 change")):
-        axis.set_yticks(y, groups)
+        axis.set_yticks(y, [token_group_display_label(group) for group in groups])
         axis.invert_yaxis()
         axis.set_xlabel("Mean divergence")
         axis.set_title(title)
+        axis.xaxis.set_major_locator(MaxNLocator(nbins=5))
         axis.grid(axis="x", alpha=0.2)
-    figure.suptitle("Representational divergence by token group")
+    cosine_formatter = ScalarFormatter(useMathText=True)
+    cosine_formatter.set_powerlimits((-2, 2))
+    axes[0].xaxis.set_major_formatter(cosine_formatter)
+    figure.suptitle(
+        "Representational divergence by token group\n"
+        "Event 2 is descriptive only because low/temporal sequence positions differ"
+    )
     figure.savefig(output_path, bbox_inches="tight")
     plt.close(figure)
 
@@ -449,6 +464,12 @@ def main():
         ["token_group"],
         ["cosine_distance", "relative_l2"],
     )
+    for row in divergence_group:
+        row["causal_interpretation"] = (
+            "non_position_aligned_descriptive_only"
+            if row.get("token_group") == "phase_event_2"
+            else "see_position_alignment_fields"
+        )
     patch_summary = summarize(
         positionwise_patches,
         ["patch_direction", "layer", "token_group"],
@@ -511,7 +532,7 @@ def main():
             )
 
     summary = {
-        "analysis_schema": "phase3_activation_patching_analysis_v2_stratified",
+        "analysis_schema": "phase3_activation_patching_analysis_v3_stratified",
         "divergence_rows": len(divergence),
         "valid_divergence_rows": sum(row.get("status") == "ok" for row in divergence),
         "missing_group_rows": sum(
@@ -558,6 +579,13 @@ def main():
             })
         },
         "correlations": correlation_rows,
+        "descriptive_only_token_groups": {
+            "phase_event_2": (
+                "Low- and temporal-boundary Event 2 tokens occupy different absolute "
+                "sequence positions. Their divergence is descriptive and does not "
+                "enter the primary position-aligned causal patch analysis."
+            )
+        },
         "interpretation_note": (
             "Primary causal summaries use only position-aligned replacement. Pooled "
             "mean-delta interventions, if present, are exported separately and are not "

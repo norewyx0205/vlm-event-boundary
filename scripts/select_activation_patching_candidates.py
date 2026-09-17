@@ -3,10 +3,18 @@ from collections import defaultdict
 from pathlib import Path
 
 try:
-    from .activation_patching_core import atomic_write_json, atomic_write_jsonl
+    from .activation_patching_core import (
+        RESIDUAL_STREAM_LOCATION,
+        atomic_write_json,
+        atomic_write_jsonl,
+    )
     from .common import read_jsonl
 except ImportError:
-    from activation_patching_core import atomic_write_json, atomic_write_jsonl
+    from activation_patching_core import (
+        RESIDUAL_STREAM_LOCATION,
+        atomic_write_json,
+        atomic_write_jsonl,
+    )
     from common import read_jsonl
 
 
@@ -27,7 +35,19 @@ def descending_percentile(values):
     return scores
 
 
+def terminal_post_residual_nondecision(row, terminal_layer):
+    return bool(
+        row.get("residual_stream_location") == RESIDUAL_STREAM_LOCATION
+        and int(row["layer"]) == int(terminal_layer)
+        and row.get("token_group") != "decision_position"
+    )
+
+
 def rank_pair(rows, required_patch_method="positionwise_replace"):
+    terminal_layer = max(
+        (int(row["layer"]) for row in rows if row.get("status") == "ok"),
+        default=-1,
+    )
     eligible = [
         dict(row)
         for row in rows
@@ -35,6 +55,7 @@ def rank_pair(rows, required_patch_method="positionwise_replace"):
         and row.get("cosine_distance") is not None
         and row.get("relative_l2") is not None
         and row.get("patch_method_eligibility") == required_patch_method
+        and not terminal_post_residual_nondecision(row, terminal_layer)
     ]
     if not eligible:
         return []
@@ -150,6 +171,14 @@ def select_candidates(
     selected = []
     audits = []
     for pair_key in sorted(grouped):
+        terminal_layer = max(
+            (
+                int(row["layer"])
+                for row in grouped[pair_key]
+                if row.get("status") == "ok"
+            ),
+            default=-1,
+        )
         ranked = rank_pair(grouped[pair_key], required_patch_method)
         pair_selected = []
         quotas = (
@@ -198,6 +227,12 @@ def select_candidates(
                 and row.get("patch_method_eligibility") != required_patch_method
                 for row in grouped[pair_key]
             ),
+            "excluded_terminal_post_residual_nondecision_locations": sum(
+                row.get("status") == "ok"
+                and row.get("patch_method_eligibility") == required_patch_method
+                and terminal_post_residual_nondecision(row, terminal_layer)
+                for row in grouped[pair_key]
+            ),
         })
     return selected, audits
 
@@ -241,7 +276,7 @@ def main():
     )
     atomic_write_jsonl(output_path, selected)
     atomic_write_json(summary_path, {
-        "selection_schema": "phase3_stratified_position_aligned_v2",
+        "selection_schema": "phase3_stratified_position_aligned_v3",
         "divergence_path": str(args.divergence_path),
         "top_k_per_pair": args.top_k_per_pair,
         "max_per_token_group": args.max_per_token_group,
@@ -258,7 +293,10 @@ def main():
             "For each matched pair, rank position-aligned locations by the mean of "
             "within-pair cosine and relative-L2 percentile scores. Preserve a fixed "
             "six-location budget: four high-divergence primary candidates plus one "
-            "medium and one low comparison candidate, with a token-group cap."
+            "medium and one low comparison candidate, with a token-group cap. "
+            "At residual-post, non-decision positions in the terminal decoder layer "
+            "are structurally ineligible because they cannot propagate to the "
+            "already-computed decision position."
         ),
         "pair_audit": audits,
     })

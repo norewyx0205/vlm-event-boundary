@@ -59,6 +59,13 @@ DEFAULT_TOKEN_GROUPS = (
     "decision_position",
 )
 
+REQUIRED_TEXT_TOKEN_GROUPS = (
+    "text_target_1_mentions",
+    "text_target_2_mentions",
+    "text_temporal_relations",
+    "text_options",
+)
+
 PILOT_EXCLUDED_TOKEN_GROUPS = {
     "phase_gap": (
         "Excluded from the first causal pilot because low_boundary has no "
@@ -206,6 +213,88 @@ def _phrase_positions(tokenizer, input_ids, phrases):
     return sorted(positions)
 
 
+def _tokenizer_ids_and_offsets(tokenizer, text):
+    try:
+        encoded = tokenizer(
+            text,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+    except (TypeError, NotImplementedError, ValueError):
+        return None, None
+    token_ids = encoded.get("input_ids")
+    offsets = encoded.get("offset_mapping")
+    if token_ids and isinstance(token_ids[0], list):
+        token_ids = token_ids[0]
+    if offsets and offsets and isinstance(offsets[0][0], (list, tuple)):
+        offsets = offsets[0]
+    if token_ids is None or offsets is None or len(token_ids) != len(offsets):
+        return None, None
+    return list(token_ids), [tuple(item) for item in offsets]
+
+
+def _option_positions(tokenizer, input_ids, option_a, option_b):
+    """Locate option sentence tokens in their rendered A:/B: prompt context."""
+    if not option_a or not option_b:
+        return []
+    core = (
+        f"A: {option_a}\n"
+        f"B: {option_b}\n\n"
+        "Answer with only A or B."
+    )
+    for prefix in ("\n\n", "\n", "", " "):
+        contextual = f"{prefix}{core}"
+        token_ids, offsets = _tokenizer_ids_and_offsets(tokenizer, contextual)
+        if not token_ids:
+            continue
+        starts = _find_subsequences(input_ids, token_ids)
+        if not starts:
+            continue
+        option_a_start = len(prefix) + len("A: ")
+        option_a_end = option_a_start + len(str(option_a))
+        option_b_start = option_a_end + len("\nB: ")
+        option_b_end = option_b_start + len(str(option_b))
+        spans = ((option_a_start, option_a_end), (option_b_start, option_b_end))
+        positions = set()
+        for sequence_start in starts:
+            for local_index, (start, end) in enumerate(offsets):
+                if end <= start:
+                    continue
+                if any(
+                    start < span_end and end > span_start
+                    for span_start, span_end in spans
+                ):
+                    positions.add(sequence_start + local_index)
+        if positions:
+            return sorted(positions)
+
+    # Offset mappings are unavailable for some slow tokenizers. In that case,
+    # match each complete labelled line and retain it as a conservative span.
+    positions = set()
+    for label, option in (("A", option_a), ("B", option_b)):
+        for contextual in (
+            f"\n{label}: {option}\n",
+            f"{label}: {option}\n",
+            f"\n{label}: {option}",
+            f"{label}: {option}",
+        ):
+            token_ids = tokenizer.encode(contextual, add_special_tokens=False)
+            for start in _find_subsequences(input_ids, token_ids):
+                positions.update(range(start, start + len(token_ids)))
+    return sorted(positions)
+
+
+def validate_required_text_groups(groups, row):
+    missing = [name for name in REQUIRED_TEXT_TOKEN_GROUPS if not groups.get(name)]
+    if missing:
+        raise RuntimeError(
+            "Failed to locate required Phase 3 text token group(s) "
+            f"{missing} for {row.get('eval_id', 'unknown eval')}. This usually "
+            "indicates that prompt-context token spans no longer match the active "
+            "chat template/tokenizer; refusing to continue with silent empty groups."
+        )
+
+
 def _target_phrases(target):
     phrases = [target.get("label"), target.get("reference_label")]
     color = target.get("color")
@@ -294,10 +383,11 @@ def build_token_groups(
         _phrase_positions(processor.tokenizer, ids, ["before", "after"])
     )
     groups["text_options"].update(
-        _phrase_positions(
+        _option_positions(
             processor.tokenizer,
             ids,
-            [row.get("option_A"), row.get("option_B")],
+            row.get("option_A"),
+            row.get("option_B"),
         )
     )
     groups["decision_position"].add(len(ids) - 1)
@@ -306,6 +396,7 @@ def build_token_groups(
         name: sorted(groups.get(name, set()))
         for name in DEFAULT_TOKEN_GROUPS
     }
+    validate_required_text_groups(output, row)
     metadata = {
         "visual_token_position_source": visual_position_source,
         "visual_token_count": len(visual),
@@ -314,6 +405,10 @@ def build_token_groups(
         "spatial_merge_size": merge_size,
         "source_frame_groups": frame_groups,
         "token_group_counts": {name: len(value) for name, value in output.items()},
+        "text_option_span_locator": (
+            "contextual_labeled_option_block_offsets_with_labelled_line_fallback_v1"
+        ),
+        "required_text_token_groups": list(REQUIRED_TEXT_TOKEN_GROUPS),
         "roi_padding": roi_padding,
         "roi_assignment": roi_assignment,
     }

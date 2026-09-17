@@ -968,6 +968,10 @@ It does not run RSA/CKA or an exhaustive layer-by-group patch sweep.
 - Hidden states are captured at decoder-layer residual-post for all 36 layers.
 - Coarse groups cover all video tokens, target/distractor ROIs, event phases,
   object mentions, before/after terms, option spans, and the decision position.
+  Option spans are located inside the rendered contextual `A:` / `B:` block,
+  rather than by standalone sentence tokenization. Expected target, relation,
+  and option text groups are fail-fast: a tokenizer/chat-template mismatch cannot
+  silently produce an empty analysis group.
 - Pairwise metrics are cosine distance and relative L2 change after explicit
   mean pooling. Token-wise diagnostics are computed only when the exact input
   sequence positions are identical; equal tensor shape alone is insufficient.
@@ -982,6 +986,10 @@ It does not run RSA/CKA or an exhaustive layer-by-group patch sweep.
   six-location budget contains four high-divergence primary candidates, one
   medium-divergence comparison, and one low-divergence comparison, with at most
   one location per token group.
+- Because captures are taken at decoder-layer residual-post, a non-decision token
+  patched after the terminal decoder layer cannot influence an already-computed
+  decision position. Such terminal-layer locations are structurally excluded;
+  only `decision_position` remains eligible at the final layer.
 - Patching is bidirectional: temporal-to-low recovery and low-to-temporal
   disruption. The primary causal analysis uses only `positionwise_replace` at
   identical sequence positions. `pooled_mean_delta`, if explicitly requested in
@@ -1005,6 +1013,13 @@ The low and temporal videos are still different inputs and Event 2 occurs at a
 different absolute time, so same-position visual patches are a documented first
 pass rather than a claim of perfect event-semantic alignment. The selected-case
 manifest retains all event annotations for a later event-relative extension.
+Accordingly, analysis figures and tables label `phase_event_2` divergence as
+**non-position-aligned, descriptive only**; it is not presented as causal evidence.
+
+The contextual text-span and terminal-layer eligibility cleanup advances the
+Phase 3 runtime schema to `temporal_boundary_activation_patching_v3_contextual_text_spans`.
+Older pilot checkpoints must remain archived and must not be resumed into this
+final rerun.
 
 ### Standalone commands
 
