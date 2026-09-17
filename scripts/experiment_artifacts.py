@@ -5,6 +5,16 @@ from pathlib import Path, PurePosixPath
 
 
 VALID_MODES = ("skip", "reuse", "analyze", "run")
+ARTIFACT_SCHEMA_VERSION = 2
+STRICT_MANIFEST_FIELDS = {
+    "artifact_schema_version",
+    "artifact_type",
+    "created_at",
+    "source_commit",
+    "model_name",
+    "model_revision",
+    "config_fingerprint",
+}
 
 EXPERIMENT_ALLOWED_MODES = {
     "baseline": {"skip", "reuse", "run"},
@@ -18,6 +28,7 @@ EXPERIMENT_ALLOWED_MODES = {
     "roi_perturbation": set(VALID_MODES),
     "attention_phase0": set(VALID_MODES),
     "attention_phase1": set(VALID_MODES),
+    "activation_patching_phase3": set(VALID_MODES),
 }
 
 
@@ -32,16 +43,19 @@ PROFILE_MODES = {
         default="reuse",
         ladder_smoke="skip",
         attention_phase0="skip",
+        activation_patching_phase3="skip",
     ),
     "analysis_only": _profile(
         default="analyze",
         baseline="reuse",
         synthetic="reuse",
         ladder_smoke="skip",
+        activation_patching_phase3="skip",
     ),
     "full_reproduction": _profile(
         default="run",
         ladder_smoke="skip",
+        activation_patching_phase3="skip",
     ),
     "smoke": _profile(
         ladder_smoke="run",
@@ -93,7 +107,7 @@ def mode_uses_artifacts(mode):
 def announce_experiment(name, mode):
     descriptions = {
         "skip": "skipped",
-        "reuse": "using validated real artifacts",
+        "reuse": "using archived artifacts after provenance audit",
         "analyze": "reusing raw artifacts and rebuilding CPU analysis",
         "run": "executing the real experiment",
     }
@@ -105,7 +119,7 @@ def require_paths(experiment, paths, hint=None):
     missing = [str(path) for path in resolved if not path.exists()]
     if missing:
         message = (
-            f"[{experiment}] required real artifact(s) are missing:\n- "
+            f"[{experiment}] required research artifact(s) are missing:\n- "
             + "\n- ".join(missing)
         )
         if hint:
@@ -122,7 +136,7 @@ def require_matches(experiment, root, pattern, minimum=1, hint=None):
     matches = matching_paths(root, pattern)
     if len(matches) < minimum:
         message = (
-            f"[{experiment}] expected at least {minimum} real artifact(s) matching "
+            f"[{experiment}] expected at least {minimum} research artifact(s) matching "
             f"{Path(root) / pattern}, found {len(matches)}."
         )
         if hint:
@@ -193,19 +207,48 @@ def _archive_manifest(archive):
         raise ArtifactError("Artifact archive has no archive_manifest.json.") from exc
     except json.JSONDecodeError as exc:
         raise ArtifactError("Artifact archive manifest is not valid JSON.") from exc
-    artifact_type = payload.get("artifact_type", "real")
-    if artifact_type != "real":
+    artifact_type = payload.get("artifact_type")
+    if artifact_type not in {None, "real"}:
         raise ArtifactError(
             f"Refusing artifact_type={artifact_type!r}; research runs require real artifacts."
         )
+    schema_version = payload.get("artifact_schema_version")
+    if schema_version is None:
+        payload["_provenance_status"] = "legacy_unverified"
+        payload["_validation_warnings"] = [
+            "Legacy archive has no artifact_schema_version; provenance fields "
+            "are audited when present but cannot be treated as strictly validated."
+        ]
+        return payload
+    if schema_version != ARTIFACT_SCHEMA_VERSION:
+        raise ArtifactError(
+            f"Unsupported artifact_schema_version={schema_version!r}; "
+            f"expected {ARTIFACT_SCHEMA_VERSION}."
+        )
+    missing = sorted(
+        field
+        for field in STRICT_MANIFEST_FIELDS
+        if payload.get(field) in {None, ""}
+    )
+    if missing:
+        raise ArtifactError(
+            "Strict artifact manifest is missing required provenance field(s): "
+            + ", ".join(missing)
+        )
+    payload["_provenance_status"] = "strict_validated"
+    payload["_validation_warnings"] = []
     return payload
 
 
 def validate_archive_manifest(manifest, expected=None):
     mismatches = {}
+    missing_expected = []
     for key, expected_value in (expected or {}).items():
         archived_value = manifest.get(key)
-        if expected_value is None or archived_value is None:
+        if expected_value is None:
+            continue
+        if archived_value is None:
+            missing_expected.append(key)
             continue
         if archived_value != expected_value:
             mismatches[key] = {
@@ -218,6 +261,16 @@ def validate_archive_manifest(manifest, expected=None):
             for key, values in mismatches.items()
         )
         raise ArtifactError(f"Artifact archive provenance mismatch: {details}")
+    if missing_expected:
+        if manifest.get("_provenance_status") == "strict_validated":
+            raise ArtifactError(
+                "Strict artifact archive cannot verify expected provenance field(s): "
+                + ", ".join(sorted(missing_expected))
+            )
+        manifest.setdefault("_validation_warnings", []).append(
+            "Legacy archive is missing expected provenance field(s): "
+            + ", ".join(sorted(missing_expected))
+        )
     return manifest
 
 
@@ -247,7 +300,13 @@ def restore_artifact_archive(archive_path, project_root, expected=None):
         archive.extractall(project_root, members=members)
     return {
         "archive_path": str(archive_path),
-        "artifact_type": "real",
+        "artifact_type": (
+            "real"
+            if manifest.get("_provenance_status") == "strict_validated"
+            else "legacy_unverified"
+        ),
+        "provenance_status": manifest.get("_provenance_status"),
+        "validation_warnings": list(manifest.get("_validation_warnings", [])),
         "source_commit": manifest.get("source_commit"),
         "model_name": manifest.get("model_name"),
         "model_revision": manifest.get("model_revision"),

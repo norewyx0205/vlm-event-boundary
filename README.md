@@ -47,6 +47,11 @@ vlm-event-boundary/
     generate_ladder_dataset.py
     run_eval.py
     analyze_results.py
+    activation_patching_core.py
+    select_activation_patching_cases.py
+    select_activation_patching_candidates.py
+    run_activation_patching.py
+    analyze_activation_patching.py
     make_mirrored_annotations.py
     check_ladder_dataset.py
   results/
@@ -916,16 +921,125 @@ EXPERIMENT_MODE_OVERRIDES = {
 For a genuine full rerun, select `full_reproduction`. `run` remains explicit so
 a missing artifact can never silently trigger an expensive model evaluation.
 
-Completed runs should be restored from the real timestamped ZIP produced by the
-final notebook cell. Exact paths can be listed in `ARTIFACT_ARCHIVES`; otherwise
-the notebook can discover the latest matching ZIP in `/content`. The archive
-manifest is checked against the configured model name and revision before safe
-extraction. Missing dependencies fail before model loading with a path-specific
-message. Archives marked `artifact_type=mock` are rejected from the research
-pipeline; mock data is reserved for unit tests and smoke fixtures.
+Completed runs should be restored from the timestamped ZIP produced by the final
+notebook cell. Formal runs should list exact paths in `ARTIFACT_ARCHIVES`;
+automatic latest-ZIP discovery remains available but is disabled by default.
+New-schema manifests must contain `artifact_type`, schema version, source commit,
+model name/revision, creation time, and configuration fingerprint, and configured
+model provenance must match before safe extraction. Legacy archives without the
+new schema remain usable for backward compatibility but are explicitly reported
+as `legacy_unverified`, with every unavailable check recorded as a warning. They
+must not be described as fully validated artifacts. Missing dependencies fail
+before model loading with a path-specific message. Archives marked
+`artifact_type=mock` are rejected from the research pipeline; mock data is
+reserved for unit tests and smoke fixtures.
 
-New archives record `artifact_type=real`, the pipeline profile, all experiment
-modes, restored archive provenance, and a stable configuration fingerprint.
+New archives record `artifact_schema_version=2`, `artifact_type=real`, the
+pipeline profile, all experiment modes, restored archive provenance, and a
+stable configuration fingerprint.
 Notebook cell outputs are intentionally not versioned as evidence: raw results,
 summary JSON/CSV files, figures, configurations, and provenance remain in the
 timestamped artifact archive.
+
+`activation_patching_phase3` is an independent experiment mode and defaults to
+`skip`. Enabling it does not rerun Part 1 or Phase 1. The Phase 3 cell consumes
+the archived `L5_full` behavioural evaluation, checkpoints each expensive GPU
+stage, and can later rebuild its analysis without loading Qwen.
+
+## Phase 3: Temporal-Boundary Activation Patching
+
+The first Phase 3 experiment is a narrow matched-pair causal pilot. It asks where
+the hidden states of low-boundary and temporal-boundary videos diverge, then tests
+which high-divergence locations causally change the first-answer-token decision.
+It does not run RSA/CKA or an exhaustive layer-by-group patch sweep.
+
+### Design
+
+- Primary temporal-rescue bases: `5,11,14,15,17,19` from `L5_full`.
+- Stable both-correct controls: bases `1,2`.
+- Both `original` and `swapped` prompts are retained.
+- Hidden states are captured at decoder-layer residual-post for all 36 layers.
+- Coarse groups cover all video tokens, target/distractor ROIs, event phases,
+  object mentions, before/after terms, option spans, and the decision position.
+- Pairwise metrics are cosine distance and relative L2 change after explicit
+  mean pooling. Token-wise diagnostics are also retained for aligned groups up
+  to the configured vector limit.
+- Candidate selection ranks locations within each matched pair by the mean of
+  cosine- and relative-L2 descending percentile scores. The default takes six
+  locations with at most one location per token group.
+- Patching is bidirectional: temporal-to-low recovery and low-to-temporal
+  disruption. Groups with identical sequence positions use position-wise
+  replacement; all other multi-token alignments use an explicitly labelled
+  pooled-mean delta intervention.
+- The primary behavioural quantity is the correct-minus-incorrect A/B first-token
+  logit margin. Categorical answer flips remain secondary.
+
+With the default 8 bases and 2 mirrored prompts, this yields 16 matched pairs,
+7,488 auditable layer/group divergence rows (including explicitly marked missing
+groups), 96 selected locations, and 192 bidirectional patch runs. The first pair
+is a fail-fast preflight. Before scaling to the remaining pairs, the patch stage
+also checks a repeated no-patch forward and same-state identity patches.
+
+Position-wise replacement is used only when the source and target groups contain
+the same sequence positions. Each patch row records this alignment assumption.
+The low and temporal videos are still different inputs and Event 2 occurs at a
+different absolute time, so same-position visual patches are a documented first
+pass rather than a claim of perfect event-semantic alignment. The selected-case
+manifest retains all event annotations for a later event-relative extension.
+
+### Standalone commands
+
+Select the auditable case manifest from an archived/current `L5_full` run:
+
+```bash
+python scripts/select_activation_patching_cases.py \
+  --annotation_path data/l5_feature_ablation_v1/L5_full/annotations.jsonl \
+  --main_results results/<model>/l5_feature_ablation_v1_main_L5_full/<run>/raw_results.jsonl \
+  --output_path analysis/activation_patching_phase3/selected_cases.jsonl \
+  --expected_model_name Qwen/Qwen3-VL-8B-Instruct \
+  --expected_model_revision 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b
+```
+
+Map divergence, select candidates, and run the bidirectional intervention:
+
+```bash
+python scripts/run_activation_patching.py divergence \
+  --manifest_path analysis/activation_patching_phase3/selected_cases.jsonl \
+  --output_path analysis/activation_patching_phase3/pairwise_divergence.jsonl \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --model_revision 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
+  --expected_transformers_version 5.9.0 --deterministic --resume
+
+python scripts/select_activation_patching_candidates.py \
+  --divergence_path analysis/activation_patching_phase3/pairwise_divergence.jsonl \
+  --output_path analysis/activation_patching_phase3/patch_candidates.jsonl \
+  --top_k_per_pair 6 --max_per_token_group 1
+
+python scripts/run_activation_patching.py patch \
+  --manifest_path analysis/activation_patching_phase3/selected_cases.jsonl \
+  --candidate_path analysis/activation_patching_phase3/patch_candidates.jsonl \
+  --output_path analysis/activation_patching_phase3/patching_results.jsonl \
+  --model_name Qwen/Qwen3-VL-8B-Instruct \
+  --model_revision 0c351dd01ed87e9c1b53cbc748cba10e6187ff3b \
+  --expected_transformers_version 5.9.0 --deterministic --resume
+
+python scripts/analyze_activation_patching.py \
+  --divergence_path analysis/activation_patching_phase3/pairwise_divergence.jsonl \
+  --candidate_path analysis/activation_patching_phase3/patch_candidates.jsonl \
+  --patching_path analysis/activation_patching_phase3/patching_results.jsonl \
+  --output_dir analysis/activation_patching_phase3/analysis --plots
+```
+
+Every GPU checkpoint has a configuration fingerprint. A changed manifest,
+candidate table, model revision, sampling configuration, ROI definition, or
+Transformers runtime is rejected before model loading rather than mixed with an
+older partial run. Isolated failures are written to an error manifest; with the
+default `--require_complete`, the process exits after checkpointing so rerunning
+the same command retries only unresolved work.
+
+The patch stage also runs no-patch and same-state identity-patch controls on the
+first matched pair. Outputs include raw JSONL, candidate-selection audit,
+configuration and runtime metadata, validation/error records, summary JSON/CSV,
+and four plots covering divergence, patch effects, and exploratory
+divergence-versus-effect relationships. Divergence is descriptive; only a patch
+effect is treated as causal-mechanistic evidence.
