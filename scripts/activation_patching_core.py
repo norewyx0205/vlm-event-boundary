@@ -59,6 +59,14 @@ DEFAULT_TOKEN_GROUPS = (
     "decision_position",
 )
 
+PILOT_EXCLUDED_TOKEN_GROUPS = {
+    "phase_gap": (
+        "Excluded from the first causal pilot because low_boundary has no "
+        "semantically matched inter-event gap. An absolute-time or event-relative "
+        "control window must be defined before this group can be compared."
+    ),
+}
+
 
 def json_safe(value):
     if isinstance(value, Path):
@@ -502,7 +510,55 @@ def relative_l2(low, temporal, eps=1e-12):
     return float((temporal.float() - low.float()).norm() / max(float(low.float().norm()), eps))
 
 
+def capture_alignment(low_capture, temporal_capture):
+    low_positions = low_capture.get("positions")
+    temporal_positions = temporal_capture.get("positions")
+    positions_available = low_positions is not None and temporal_positions is not None
+    positions_identical = bool(
+        positions_available and list(low_positions) == list(temporal_positions)
+    )
+    low_values = low_capture.get("values")
+    temporal_values = temporal_capture.get("values")
+    value_shapes_identical = bool(
+        low_values is not None
+        and temporal_values is not None
+        and low_values.shape == temporal_values.shape
+    )
+    tokenwise_eligible = bool(
+        positions_identical and value_shapes_identical and low_values.shape[0] > 0
+    )
+    positionwise_alignment_eligible = bool(
+        positions_identical and len(low_positions) > 0
+    )
+    if not positions_available:
+        position_alignment = "positions_unavailable"
+    elif positions_identical:
+        position_alignment = "identical_sequence_positions"
+    else:
+        position_alignment = "different_sequence_positions"
+    return {
+        "position_alignment": position_alignment,
+        "positions_identical": positions_identical,
+        "event_relative_mapping_used": False,
+        "event_relative_mapping": None,
+        "value_shapes_identical": value_shapes_identical,
+        "positionwise_alignment_eligible": positionwise_alignment_eligible,
+        "tokenwise_metrics_eligible": tokenwise_eligible,
+        "tokenwise_alignment_assumption": (
+            "identical_sequence_positions"
+            if tokenwise_eligible
+            else "not_computed_without_explicit_token_correspondence"
+        ),
+        "patch_method_eligibility": (
+            "positionwise_replace"
+            if positionwise_alignment_eligible
+            else "pooled_mean_delta"
+        ),
+    }
+
+
 def divergence_metrics(low_capture, temporal_capture, eps=1e-12):
+    alignment = capture_alignment(low_capture, temporal_capture)
     low_mean = low_capture.get("mean")
     temporal_mean = temporal_capture.get("mean")
     if low_mean is None or temporal_mean is None:
@@ -513,6 +569,7 @@ def divergence_metrics(low_capture, temporal_capture, eps=1e-12):
             "tokenwise_cosine_mean": None,
             "tokenwise_cosine_median": None,
             "tokenwise_relative_l2_mean": None,
+            **alignment,
         }
     result = {
         "status": "ok",
@@ -521,15 +578,11 @@ def divergence_metrics(low_capture, temporal_capture, eps=1e-12):
         "tokenwise_cosine_mean": None,
         "tokenwise_cosine_median": None,
         "tokenwise_relative_l2_mean": None,
+        **alignment,
     }
     low_values = low_capture.get("values")
     temporal_values = temporal_capture.get("values")
-    if (
-        low_values is not None
-        and temporal_values is not None
-        and low_values.shape == temporal_values.shape
-        and low_values.shape[0] > 0
-    ):
+    if alignment["tokenwise_metrics_eligible"]:
         similarities = torch.nn.functional.cosine_similarity(
             low_values.float(), temporal_values.float(), dim=-1, eps=eps
         )
@@ -554,15 +607,16 @@ def selected_capture_groups(candidates, prepared):
 
 
 def patch_method(source_capture, target_capture):
-    source_values = source_capture.get("values")
-    target_values = target_capture.get("values")
-    if (
-        source_values is not None
-        and target_values is not None
-        and source_values.shape == target_values.shape
-        and source_capture.get("positions") == target_capture.get("positions")
-    ):
-        return "positionwise_replace"
+    alignment = capture_alignment(source_capture, target_capture)
+    if alignment["positionwise_alignment_eligible"]:
+        source_values = source_capture.get("values")
+        target_values = target_capture.get("values")
+        if (
+            source_values is not None
+            and target_values is not None
+            and source_values.shape == target_values.shape
+        ):
+            return "positionwise_replace"
     return "pooled_mean_delta"
 
 

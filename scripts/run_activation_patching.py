@@ -13,6 +13,7 @@ import transformers
 try:
     from .activation_patching_core import (
         DEFAULT_TOKEN_GROUPS,
+        PILOT_EXCLUDED_TOKEN_GROUPS,
         POOLING_METHOD,
         RESIDUAL_STREAM_LOCATION,
         atomic_write_json,
@@ -33,6 +34,7 @@ try:
 except ImportError:
     from activation_patching_core import (
         DEFAULT_TOKEN_GROUPS,
+        PILOT_EXCLUDED_TOKEN_GROUPS,
         POOLING_METHOD,
         RESIDUAL_STREAM_LOCATION,
         atomic_write_json,
@@ -52,7 +54,7 @@ except ImportError:
     from run_eval import configure_reproducibility, environment_metadata, load_model
 
 
-PHASE3_SCHEMA = "temporal_boundary_activation_patching_v1"
+PHASE3_SCHEMA = "temporal_boundary_activation_patching_v2_methodologically_stratified"
 DIRECTIONS = (
     ("temporal_to_low", "temporal_boundary", "low_boundary"),
     ("low_to_temporal", "low_boundary", "temporal_boundary"),
@@ -66,6 +68,13 @@ def shared_row_metadata(row):
         "feature_variant": row.get("feature_variant"),
         "prompt_variant": row.get("prompt_variant"),
         "case_category": row.get("phase3_case_category"),
+        "base_selection_category": row.get("phase3_base_selection_category"),
+        "prompt_pair_behavior": row.get("phase3_prompt_pair_behavior"),
+        "analysis_stratum": row.get("phase3_analysis_stratum"),
+        "prompt_role": row.get("phase3_prompt_role"),
+        "independently_satisfies_rescue": row.get(
+            "phase3_independently_satisfies_rescue"
+        ),
         "correct_option": row.get("correct_option"),
     }
 
@@ -145,7 +154,19 @@ def divergence_rows_for_pair(pair_key, prepared, captures, eps):
             temporal_capture = temporal_run["captures"][layer].get(
                 group, {"count": 0, "mean": None, "values": None}
             )
-            metrics = divergence_metrics(low_capture, temporal_capture, eps)
+            if group in PILOT_EXCLUDED_TOKEN_GROUPS:
+                metrics = divergence_metrics(low_capture, temporal_capture, eps)
+                metrics.update({
+                    "status": "excluded_unmatched_phase",
+                    "cosine_distance": None,
+                    "relative_l2": None,
+                    "tokenwise_cosine_mean": None,
+                    "tokenwise_cosine_median": None,
+                    "tokenwise_relative_l2_mean": None,
+                    "exclusion_reason": PILOT_EXCLUDED_TOKEN_GROUPS[group],
+                })
+            else:
+                metrics = divergence_metrics(low_capture, temporal_capture, eps)
             rows.append({
                 "schema": PHASE3_SCHEMA,
                 **metadata,
@@ -352,6 +373,17 @@ def patch_result_row(candidate, direction, source_condition, target_condition, b
     patched_decision = patched["decision"]
     margin_change = patched_decision["margin"] - baseline_decision["margin"]
     aligned_effect = margin_change if direction == "temporal_to_low" else -margin_change
+    expected_method = candidate.get("patch_method_eligibility")
+    if expected_method and patched["patch_method"] != expected_method:
+        raise RuntimeError(
+            "Patch method changed between candidate selection and intervention: "
+            f"expected={expected_method}, actual={patched['patch_method']}."
+        )
+    intervention_family = (
+        "standard_position_aligned_activation_patching"
+        if patched["patch_method"] == "positionwise_replace"
+        else "exploratory_pooled_group_mean_delta"
+    )
     return {
         "schema": PHASE3_SCHEMA,
         "phase3_pair_id": candidate["phase3_pair_id"],
@@ -359,6 +391,13 @@ def patch_result_row(candidate, direction, source_condition, target_condition, b
         "feature_variant": candidate.get("feature_variant"),
         "prompt_variant": candidate.get("prompt_variant"),
         "case_category": candidate.get("case_category"),
+        "base_selection_category": candidate.get("base_selection_category"),
+        "prompt_pair_behavior": candidate.get("prompt_pair_behavior"),
+        "analysis_stratum": candidate.get("analysis_stratum"),
+        "prompt_role": candidate.get("prompt_role"),
+        "independently_satisfies_rescue": candidate.get(
+            "independently_satisfies_rescue"
+        ),
         "source_condition": source_condition,
         "target_condition": target_condition,
         "patch_direction": direction,
@@ -366,6 +405,8 @@ def patch_result_row(candidate, direction, source_condition, target_condition, b
         "token_group": candidate["token_group"],
         "candidate_rank": candidate.get("candidate_rank"),
         "candidate_score": candidate.get("candidate_score"),
+        "divergence_stratum": candidate.get("divergence_stratum"),
+        "selection_role": candidate.get("selection_role"),
         "cosine_distance": candidate.get("cosine_distance"),
         "relative_l2": candidate.get("relative_l2"),
         "residual_stream_location": RESIDUAL_STREAM_LOCATION,
@@ -381,6 +422,20 @@ def patch_result_row(candidate, direction, source_condition, target_condition, b
             else candidate.get("temporal_token_count")
         ),
         "patch_method": patched["patch_method"],
+        "intervention_family": intervention_family,
+        "standard_activation_patching": (
+            patched["patch_method"] == "positionwise_replace"
+        ),
+        "primary_causal_test": (
+            patched["patch_method"] == "positionwise_replace"
+            and candidate.get("selection_role") == "primary_high_divergence"
+            and candidate.get("analysis_stratum") == "primary_original_rescue"
+        ),
+        "position_alignment": candidate.get("position_alignment"),
+        "positions_identical": candidate.get("positions_identical"),
+        "event_relative_mapping_used": candidate.get(
+            "event_relative_mapping_used", False
+        ),
         "baseline_target_margin": baseline_decision["margin"],
         "baseline_source_margin": (
             candidate.get("temporal_margin")
@@ -692,6 +747,7 @@ def main():
         "validation_pairs": args.validation_pairs,
         "no_op_atol": args.no_op_atol,
         "max_tokenwise_vectors": args.max_tokenwise_vectors,
+        "pilot_excluded_token_groups": PILOT_EXCLUDED_TOKEN_GROUPS,
         "verify_standard_generation": args.verify_standard_generation,
         "manifest_sha256": file_sha256(args.manifest_path),
         "candidate_sha256": (
@@ -748,6 +804,7 @@ def main():
         "validation_pairs": args.validation_pairs,
         "no_op_atol": args.no_op_atol,
         "max_tokenwise_vectors": args.max_tokenwise_vectors,
+        "pilot_excluded_token_groups": PILOT_EXCLUDED_TOKEN_GROUPS,
         "verify_standard_generation": args.verify_standard_generation,
         "roi_padding": args.roi_padding,
         "roi_assignment": args.roi_assignment,

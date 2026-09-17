@@ -98,7 +98,7 @@ def index_results(rows):
     return output
 
 
-def classify_original(low_result, temporal_result):
+def classify_prompt_pair(low_result, temporal_result):
     low_correct = bool(low_result.get("is_correct"))
     temporal_correct = bool(temporal_result.get("is_correct"))
     if not low_correct and temporal_correct:
@@ -106,6 +106,24 @@ def classify_original(low_result, temporal_result):
     if low_correct and temporal_correct:
         return "stable_both_correct"
     return "other"
+
+
+def analysis_stratum(base_category, prompt_variant, prompt_pair_behavior):
+    if prompt_variant == "original":
+        if (
+            base_category == "temporal_rescue_base"
+            and prompt_pair_behavior == "temporal_rescue"
+        ):
+            return "primary_original_rescue"
+        if (
+            base_category == "stable_both_correct_control_base"
+            and prompt_pair_behavior == "stable_both_correct"
+        ):
+            return "stable_both_correct_control"
+        return "original_prompt_other"
+    if prompt_pair_behavior == "temporal_rescue":
+        return "swapped_independent_rescue"
+    return "mirrored_prompt_control"
 
 
 def select_cases(annotation_rows, result_rows, rescue_bases, control_bases):
@@ -126,7 +144,7 @@ def select_cases(annotation_rows, result_rows, rescue_bases, control_bases):
             if result is None:
                 raise ValueError(f"Missing archived result for {annotation['eval_id']}.")
             original_rows[condition] = (annotation, result)
-        observed_category = classify_original(
+        observed_category = classify_prompt_pair(
             original_rows["low_boundary"][1],
             original_rows["temporal_boundary"][1],
         )
@@ -136,8 +154,15 @@ def select_cases(annotation_rows, result_rows, rescue_bases, control_bases):
                 f"prompt, but archived behaviour is {observed_category}."
             )
 
+        base_category = (
+            "temporal_rescue_base"
+            if expected_category == "temporal_rescue"
+            else "stable_both_correct_control_base"
+        )
+        prompt_pair_audit = {}
         for variant in PROMPT_VARIANTS:
             pair_rows = []
+            archived_by_condition = {}
             for condition in CONDITIONS:
                 key = (base_id, condition, variant)
                 if key not in annotations:
@@ -146,10 +171,38 @@ def select_cases(annotation_rows, result_rows, rescue_bases, control_bases):
                 archived = results.get(annotation["eval_id"])
                 if archived is None:
                     raise ValueError(f"Missing archived result for {annotation['eval_id']}.")
+                archived_by_condition[condition] = archived
+            prompt_pair_behavior = classify_prompt_pair(
+                archived_by_condition["low_boundary"],
+                archived_by_condition["temporal_boundary"],
+            )
+            stratum = analysis_stratum(
+                base_category, variant, prompt_pair_behavior
+            )
+            prompt_pair_audit[variant] = {
+                "prompt_pair_behavior": prompt_pair_behavior,
+                "analysis_stratum": stratum,
+                "low_prediction": archived_by_condition["low_boundary"].get("prediction"),
+                "temporal_prediction": archived_by_condition["temporal_boundary"].get("prediction"),
+            }
+            for condition in CONDITIONS:
+                annotation = annotations[(base_id, condition, variant)]
+                archived = archived_by_condition[condition]
                 row = dict(annotation)
                 row.update({
                     "phase3_pair_id": pair_id(annotation),
-                    "phase3_case_category": expected_category,
+                    "phase3_case_category": stratum,
+                    "phase3_base_selection_category": base_category,
+                    "phase3_prompt_pair_behavior": prompt_pair_behavior,
+                    "phase3_analysis_stratum": stratum,
+                    "phase3_prompt_role": (
+                        "original_selection_prompt"
+                        if variant == "original"
+                        else "swapped_mirrored_control"
+                    ),
+                    "phase3_independently_satisfies_rescue": (
+                        prompt_pair_behavior == "temporal_rescue"
+                    ),
                     "phase3_selection_basis": "original_prompt_archived_behaviour",
                     "archived_prediction": archived.get("prediction"),
                     "archived_is_correct": archived.get("is_correct"),
@@ -165,6 +218,7 @@ def select_cases(annotation_rows, result_rows, rescue_bases, control_bases):
             "observed_original_category": observed_category,
             "original_low_prediction": original_rows["low_boundary"][1].get("prediction"),
             "original_temporal_prediction": original_rows["temporal_boundary"][1].get("prediction"),
+            "prompt_pair_audit": prompt_pair_audit,
         })
     return selected, audits
 
@@ -247,7 +301,7 @@ def main():
     )
     atomic_write_jsonl(output_path, selected)
     atomic_write_json(summary_path, {
-        "selection_schema": "phase3_temporal_rescue_v1",
+        "selection_schema": "phase3_temporal_rescue_v2_prompt_pair_audited",
         "annotation_path": str(args.annotation_path),
         "main_results": str(args.main_results),
         "rescue_bases": list(rescue_bases),

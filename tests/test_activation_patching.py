@@ -8,6 +8,7 @@ import torch
 
 from scripts import activation_patching_core as core
 from scripts import analyze_activation_patching as analysis
+from scripts import run_activation_patching as runner
 from scripts import select_activation_patching_candidates as candidates
 from scripts import select_activation_patching_cases as cases
 
@@ -111,8 +112,30 @@ class ActivationPatchingTest(unittest.TestCase):
 
         self.assertEqual(len(selected), 8)
         self.assertEqual({row["phase3_case_category"] for row in selected}, {
-            "temporal_rescue", "stable_both_correct"
+            "primary_original_rescue",
+            "mirrored_prompt_control",
+            "stable_both_correct_control",
         })
+        rescue_original = [
+            row for row in selected
+            if row["base_sample_id"] == 5 and row["prompt_variant"] == "original"
+        ]
+        rescue_swapped = [
+            row for row in selected
+            if row["base_sample_id"] == 5 and row["prompt_variant"] == "swapped"
+        ]
+        self.assertTrue(all(
+            row["phase3_prompt_pair_behavior"] == "temporal_rescue"
+            for row in rescue_original
+        ))
+        self.assertTrue(all(
+            row["phase3_prompt_pair_behavior"] == "stable_both_correct"
+            for row in rescue_swapped
+        ))
+        self.assertTrue(all(
+            row["phase3_base_selection_category"] == "temporal_rescue_base"
+            for row in rescue_original + rescue_swapped
+        ))
         self.assertEqual(len(audits), 2)
 
     def test_case_selection_validates_archived_model_config(self):
@@ -148,6 +171,7 @@ class ActivationPatchingTest(unittest.TestCase):
                     "token_group": f"group_{index % 4}",
                     "cosine_distance": 8 - index,
                     "relative_l2": 4 + (index % 3),
+                    "patch_method_eligibility": "positionwise_replace",
                 })
 
         selected, audits = candidates.select_candidates(
@@ -158,7 +182,36 @@ class ActivationPatchingTest(unittest.TestCase):
         for pair in ("pair_a", "pair_b"):
             groups = [row["token_group"] for row in selected if row["phase3_pair_id"] == pair]
             self.assertEqual(len(groups), len(set(groups)))
+            strata = [
+                row["divergence_stratum"]
+                for row in selected if row["phase3_pair_id"] == pair
+            ]
+            self.assertEqual(strata.count("high"), 1)
+            self.assertEqual(strata.count("medium"), 1)
+            self.assertEqual(strata.count("low"), 1)
         self.assertEqual(len(audits), 2)
+
+    def test_candidate_selection_excludes_pooled_mean_delta(self):
+        rows = []
+        for index in range(9):
+            rows.append({
+                "phase3_pair_id": "pair_a",
+                "status": "ok",
+                "layer": index,
+                "token_group": f"group_{index % 6}",
+                "cosine_distance": 9 - index,
+                "relative_l2": 9 - index,
+                "patch_method_eligibility": (
+                    "pooled_mean_delta" if index == 0 else "positionwise_replace"
+                ),
+            })
+        selected, _ = candidates.select_candidates(
+            rows, top_k_per_pair=3, max_per_token_group=1
+        )
+        self.assertTrue(all(
+            row["patch_method_eligibility"] == "positionwise_replace"
+            for row in selected
+        ))
 
     def test_residual_patch_and_identity_noop(self):
         model = FakeModel()
@@ -204,14 +257,52 @@ class ActivationPatchingTest(unittest.TestCase):
             {"mean": torch.ones(2), "values": None},
         )
         available = core.divergence_metrics(
-            {"mean": torch.tensor([1.0, 0.0]), "values": torch.tensor([[1.0, 0.0]])},
-            {"mean": torch.tensor([0.0, 1.0]), "values": torch.tensor([[0.0, 1.0]])},
+            {
+                "mean": torch.tensor([1.0, 0.0]),
+                "values": torch.tensor([[1.0, 0.0]]),
+                "positions": [4],
+            },
+            {
+                "mean": torch.tensor([0.0, 1.0]),
+                "values": torch.tensor([[0.0, 1.0]]),
+                "positions": [4],
+            },
         )
 
         self.assertEqual(missing["status"], "missing_token_group")
         self.assertAlmostEqual(available["cosine_distance"], 1.0)
         self.assertAlmostEqual(available["relative_l2"], 2 ** 0.5)
         self.assertAlmostEqual(available["tokenwise_cosine_mean"], 1.0)
+        self.assertEqual(
+            available["tokenwise_alignment_assumption"],
+            "identical_sequence_positions",
+        )
+
+    def test_tokenwise_divergence_requires_explicit_position_alignment(self):
+        left = {
+            "mean": torch.tensor([1.0, 0.0]),
+            "values": torch.tensor([[1.0, 0.0]]),
+            "positions": [4],
+        }
+        right = {
+            "mean": torch.tensor([0.0, 1.0]),
+            "values": torch.tensor([[0.0, 1.0]]),
+            "positions": [5],
+        }
+        result = core.divergence_metrics(left, right)
+        self.assertIsNone(result["tokenwise_cosine_mean"])
+        self.assertFalse(result["tokenwise_metrics_eligible"])
+        self.assertEqual(result["position_alignment"], "different_sequence_positions")
+        self.assertFalse(result["event_relative_mapping_used"])
+
+    def test_position_alignment_can_be_patchable_without_tokenwise_vectors(self):
+        result = core.divergence_metrics(
+            {"mean": torch.ones(2), "values": None, "positions": [3, 4]},
+            {"mean": torch.zeros(2), "values": None, "positions": [3, 4]},
+        )
+        self.assertEqual(result["patch_method_eligibility"], "positionwise_replace")
+        self.assertFalse(result["tokenwise_metrics_eligible"])
+        self.assertIsNone(result["tokenwise_cosine_mean"])
 
     def test_positionwise_patch_requires_matching_sequence_positions(self):
         source = {
@@ -252,6 +343,51 @@ class ActivationPatchingTest(unittest.TestCase):
     def test_spearman_uses_tied_ranks(self):
         self.assertAlmostEqual(analysis.spearman([1, 2, 3], [2, 4, 6]), 1.0)
         self.assertAlmostEqual(analysis.spearman([1, 2, 3], [6, 4, 2]), -1.0)
+
+    def test_analysis_separates_positionwise_and_pooled_interventions(self):
+        rows = analysis.normalize_analysis_metadata([
+            {"patch_method": "positionwise_replace", "case_category": "primary"},
+            {"patch_method": "pooled_mean_delta", "case_category": "control"},
+        ])
+        self.assertTrue(rows[0]["standard_activation_patching"])
+        self.assertFalse(rows[1]["standard_activation_patching"])
+        self.assertEqual(
+            rows[1]["intervention_family"],
+            "exploratory_pooled_group_mean_delta",
+        )
+
+    def test_phase_gap_is_explicitly_excluded_from_first_pilot(self):
+        capture = {
+            "count": 1,
+            "positions": [4],
+            "mean": torch.ones(2),
+            "values": torch.ones(1, 2),
+        }
+        prepared = {
+            "low_boundary": {"row": annotation(5, "low_boundary", "original")},
+            "temporal_boundary": {
+                "row": annotation(5, "temporal_boundary", "original")
+            },
+        }
+        captures = {
+            condition: {
+                "layer_count": 1,
+                "captures": {0: {"phase_gap": capture}},
+                "decision": {
+                    "prediction": "A",
+                    "margin": 1.0,
+                    "is_correct": True,
+                },
+            }
+            for condition in ("low_boundary", "temporal_boundary")
+        }
+        rows = runner.divergence_rows_for_pair(
+            "pair", prepared, captures, 1e-12
+        )
+        phase_gap = next(row for row in rows if row["token_group"] == "phase_gap")
+        self.assertEqual(phase_gap["status"], "excluded_unmatched_phase")
+        self.assertIsNone(phase_gap["cosine_distance"])
+        self.assertIn("no semantically matched", phase_gap["exclusion_reason"])
 
 
 if __name__ == "__main__":

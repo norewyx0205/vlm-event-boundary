@@ -99,6 +99,10 @@ def correlations(patch_rows):
     groups = {"all": patch_rows}
     for direction in sorted({row.get("patch_direction") for row in patch_rows}):
         groups[direction] = [row for row in patch_rows if row.get("patch_direction") == direction]
+    for stratum in sorted({row.get("analysis_stratum") for row in patch_rows}):
+        groups[f"analysis_stratum:{stratum}"] = [
+            row for row in patch_rows if row.get("analysis_stratum") == stratum
+        ]
     for pair_key in sorted({row.get("phase3_pair_id") for row in patch_rows}):
         groups[f"pair:{pair_key}"] = [
             row for row in patch_rows if row.get("phase3_pair_id") == pair_key
@@ -117,6 +121,30 @@ def correlations(patch_rows):
                 [row.get("source_aligned_patch_effect") for row in rows],
             ),
         })
+    return output
+
+
+def patch_method_family(row):
+    if row.get("patch_method") == "positionwise_replace":
+        return "standard_position_aligned_activation_patching"
+    return "exploratory_pooled_group_mean_delta"
+
+
+def normalize_analysis_metadata(rows):
+    output = []
+    for source in rows:
+        row = dict(source)
+        row["analysis_stratum"] = (
+            row.get("analysis_stratum") or row.get("case_category") or "unclassified"
+        )
+        row["prompt_pair_behavior"] = row.get("prompt_pair_behavior") or "unavailable"
+        row["divergence_stratum"] = row.get("divergence_stratum") or "unavailable"
+        row["selection_role"] = row.get("selection_role") or "unavailable"
+        row["intervention_family"] = row.get("intervention_family") or patch_method_family(row)
+        row["standard_activation_patching"] = (
+            row.get("patch_method") == "positionwise_replace"
+        )
+        output.append(row)
     return output
 
 
@@ -211,27 +239,86 @@ def plot_divergence_vs_effect(rows, output_path):
     plt = setup_plotting()
     figure, axes = plt.subplots(1, 2, figsize=(12, 4.8), constrained_layout=True)
     colors = {"temporal_to_low": "#2A9D55", "low_to_temporal": "#8E3B8F"}
+    markers = {"high": "o", "medium": "s", "low": "^", "unavailable": "x"}
     for axis, metric, label in zip(
         axes,
         ("cosine_distance", "relative_l2"),
         ("Cosine distance", "Relative L2 change"),
     ):
         for direction in ("temporal_to_low", "low_to_temporal"):
-            subset = [row for row in rows if row.get("patch_direction") == direction]
-            axis.scatter(
-                [row[metric] for row in subset],
-                [row["source_aligned_patch_effect"] for row in subset],
-                s=28,
-                alpha=0.72,
-                color=colors[direction],
-                label=direction.replace("_", " "),
-            )
+            for stratum in ("high", "medium", "low", "unavailable"):
+                subset = [
+                    row for row in rows
+                    if row.get("patch_direction") == direction
+                    and row.get("divergence_stratum") == stratum
+                ]
+                if not subset:
+                    continue
+                axis.scatter(
+                    [row[metric] for row in subset],
+                    [row["source_aligned_patch_effect"] for row in subset],
+                    s=30,
+                    alpha=0.72,
+                    marker=markers[stratum],
+                    color=colors[direction],
+                    label=f"{direction.replace('_', ' ')} | {stratum}",
+                )
         axis.axhline(0, color="#555555", linewidth=0.8)
         axis.set_xlabel(label)
         axis.set_ylabel("Source-aligned patch effect")
         axis.grid(alpha=0.2)
     axes[1].legend(frameon=False)
-    figure.suptitle("Representational divergence versus causal patch effect")
+    figure.suptitle(
+        "Divergence versus position-aligned patch effect\n"
+        "High candidates are primary; medium/low candidates diagnose range restriction"
+    )
+    figure.savefig(output_path, bbox_inches="tight")
+    plt.close(figure)
+
+
+def plot_patch_effect_by_analysis_stratum(rows, output_path):
+    plt = setup_plotting()
+    preferred_order = (
+        "primary_original_rescue",
+        "swapped_independent_rescue",
+        "mirrored_prompt_control",
+        "stable_both_correct_control",
+        "original_prompt_other",
+        "unclassified",
+    )
+    available = {row.get("analysis_stratum") for row in rows}
+    strata = [item for item in preferred_order if item in available]
+    strata.extend(sorted(available - set(strata)))
+    directions = ("temporal_to_low", "low_to_temporal")
+    colors = ("#2A9D55", "#8E3B8F")
+    x = np.arange(len(strata))
+    width = 0.36
+    figure, axis = plt.subplots(
+        figsize=(max(8, len(strata) * 1.7), 5.2), constrained_layout=True
+    )
+    for offset, direction, color in zip((-width / 2, width / 2), directions, colors):
+        values = [
+            mean(
+                row.get("source_aligned_patch_effect")
+                for row in rows
+                if row.get("analysis_stratum") == stratum
+                and row.get("patch_direction") == direction
+            )
+            for stratum in strata
+        ]
+        axis.bar(
+            x + offset,
+            [np.nan if value is None else value for value in values],
+            width,
+            color=color,
+            label=direction.replace("_", " "),
+        )
+    axis.axhline(0, color="#555555", linewidth=0.8)
+    axis.set_xticks(x, [item.replace("_", "\n") for item in strata])
+    axis.set_ylabel("Mean source-aligned margin change")
+    axis.set_title("Position-aligned patch effects by behavioural analysis stratum")
+    axis.grid(axis="y", alpha=0.2)
+    axis.legend(frameon=False)
     figure.savefig(output_path, bbox_inches="tight")
     plt.close(figure)
 
@@ -248,7 +335,32 @@ def main():
 
     divergence = read_jsonl(args.divergence_path)
     candidates = read_jsonl(args.candidate_path)
-    patches = [row for row in read_jsonl(args.patching_path) if row.get("status") == "ok"]
+    patches = normalize_analysis_metadata(
+        row for row in read_jsonl(args.patching_path) if row.get("status") == "ok"
+    )
+    positionwise_patches = [
+        row for row in patches if row["standard_activation_patching"]
+    ]
+    pooled_mean_delta_patches = [
+        row for row in patches if not row["standard_activation_patching"]
+    ]
+    primary_rescue_patches = [
+        row for row in positionwise_patches
+        if row.get("analysis_stratum") == "primary_original_rescue"
+        and row.get("divergence_stratum") == "high"
+    ]
+    mirrored_control_patches = [
+        row for row in positionwise_patches
+        if row.get("analysis_stratum") == "mirrored_prompt_control"
+    ]
+    stable_control_patches = [
+        row for row in positionwise_patches
+        if row.get("analysis_stratum") == "stable_both_correct_control"
+    ]
+    swapped_rescue_patches = [
+        row for row in positionwise_patches
+        if row.get("analysis_stratum") == "swapped_independent_rescue"
+    ]
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -288,9 +400,44 @@ def main():
     )
     divergence_errors, divergence_error_path = adjacent_errors(args.divergence_path)
     patch_errors, patch_error_path = adjacent_errors(args.patching_path)
+    patch_fieldnames = []
+    for row in patches:
+        for key in row:
+            if key not in patch_fieldnames:
+                patch_fieldnames.append(key)
 
     write_csv(output_dir / "pairwise_divergence.csv", divergence)
     write_csv(output_dir / "patching_results.csv", patches)
+    write_csv(
+        output_dir / "patching_results_positionwise_primary_method.csv",
+        positionwise_patches,
+        fieldnames=patch_fieldnames,
+    )
+    write_csv(
+        output_dir / "patching_results_pooled_mean_delta_exploratory.csv",
+        pooled_mean_delta_patches,
+        fieldnames=patch_fieldnames,
+    )
+    write_csv(
+        output_dir / "patching_results_primary_original_rescue_high.csv",
+        primary_rescue_patches,
+        fieldnames=patch_fieldnames,
+    )
+    write_csv(
+        output_dir / "patching_results_mirrored_prompt_controls.csv",
+        mirrored_control_patches,
+        fieldnames=patch_fieldnames,
+    )
+    write_csv(
+        output_dir / "patching_results_stable_both_correct_controls.csv",
+        stable_control_patches,
+        fieldnames=patch_fieldnames,
+    )
+    write_csv(
+        output_dir / "patching_results_swapped_independent_rescue.csv",
+        swapped_rescue_patches,
+        fieldnames=patch_fieldnames,
+    )
     write_csv(output_dir / "selected_patch_candidates.csv", candidates)
     divergence_layer = summarize(
         [row for row in divergence if row.get("status") == "ok"],
@@ -303,41 +450,84 @@ def main():
         ["cosine_distance", "relative_l2"],
     )
     patch_summary = summarize(
-        patches,
+        positionwise_patches,
         ["patch_direction", "layer", "token_group"],
         ["margin_change", "source_aligned_patch_effect"],
     )
     divergence_case_summary = summarize(
         [row for row in divergence if row.get("status") == "ok"],
-        ["case_category", "prompt_variant", "token_group"],
+        [
+            "analysis_stratum",
+            "prompt_pair_behavior",
+            "prompt_variant",
+            "token_group",
+        ],
         ["cosine_distance", "relative_l2"],
     )
     patch_case_summary = summarize(
-        patches,
-        ["case_category", "prompt_variant", "patch_direction"],
+        positionwise_patches,
+        [
+            "analysis_stratum",
+            "prompt_pair_behavior",
+            "divergence_stratum",
+            "patch_direction",
+        ],
         ["margin_change", "source_aligned_patch_effect"],
     )
-    correlation_rows = correlations(patches)
+    method_summary = summarize(
+        patches,
+        ["intervention_family", "analysis_stratum", "patch_direction"],
+        ["margin_change", "source_aligned_patch_effect"],
+    )
+    correlation_rows = correlations(positionwise_patches)
     write_csv(output_dir / "divergence_by_layer.csv", divergence_layer)
     write_csv(output_dir / "divergence_by_token_group.csv", divergence_group)
     write_csv(output_dir / "patch_effect_by_layer_token_group.csv", patch_summary)
     write_csv(output_dir / "divergence_by_case_prompt_group.csv", divergence_case_summary)
     write_csv(output_dir / "patch_effect_by_case_prompt.csv", patch_case_summary)
+    write_csv(output_dir / "patch_effect_by_intervention_family.csv", method_summary)
     write_csv(output_dir / "divergence_patch_correlations.csv", correlation_rows)
 
     if args.plots:
         plot_divergence_by_layer(divergence, output_dir / "divergence_by_layer.png")
         plot_divergence_by_group(divergence, output_dir / "divergence_by_token_group.png")
-        plot_patch_heatmap(patches, output_dir / "patch_effect_by_layer_token_group.png")
-        plot_divergence_vs_effect(patches, output_dir / "divergence_vs_patch_effect.png")
+        if positionwise_patches:
+            plot_patch_heatmap(
+                positionwise_patches,
+                output_dir / "patch_effect_by_layer_token_group.png",
+            )
+            plot_divergence_vs_effect(
+                positionwise_patches,
+                output_dir / "divergence_vs_patch_effect.png",
+            )
+            plot_patch_effect_by_analysis_stratum(
+                positionwise_patches,
+                output_dir / "patch_effect_by_analysis_stratum.png",
+            )
+        if primary_rescue_patches:
+            plot_patch_heatmap(
+                primary_rescue_patches,
+                output_dir / "patch_effect_primary_original_rescue_high.png",
+            )
 
     summary = {
-        "analysis_schema": "phase3_activation_patching_analysis_v1",
+        "analysis_schema": "phase3_activation_patching_analysis_v2_stratified",
         "divergence_rows": len(divergence),
         "valid_divergence_rows": sum(row.get("status") == "ok" for row in divergence),
-        "missing_group_rows": sum(row.get("status") != "ok" for row in divergence),
+        "missing_group_rows": sum(
+            row.get("status") == "missing_token_group" for row in divergence
+        ),
+        "excluded_unmatched_phase_rows": sum(
+            row.get("status") == "excluded_unmatched_phase" for row in divergence
+        ),
         "candidate_rows": len(candidates),
         "patch_rows": len(patches),
+        "positionwise_patch_rows": len(positionwise_patches),
+        "pooled_mean_delta_exploratory_rows": len(pooled_mean_delta_patches),
+        "primary_original_rescue_high_rows": len(primary_rescue_patches),
+        "mirrored_prompt_control_rows": len(mirrored_control_patches),
+        "stable_both_correct_control_rows": len(stable_control_patches),
+        "swapped_independent_rescue_rows": len(swapped_rescue_patches),
         "expected_patch_rows": len(expected_patch_keys),
         "missing_patch_rows": len(missing_patch_keys),
         "complete_patch_matrix": not missing_patch_keys,
@@ -346,16 +536,34 @@ def main():
         "divergence_error_manifest": divergence_error_path,
         "patch_error_manifest": patch_error_path,
         "matched_pairs": len({row.get("phase3_pair_id") for row in divergence}),
-        "categorical_flips": sum(bool(row.get("categorical_flip")) for row in patches),
-        "flips_toward_correct": sum(bool(row.get("flip_toward_correct")) for row in patches),
-        "flips_away_from_correct": sum(bool(row.get("flip_away_from_correct")) for row in patches),
-        "mean_source_aligned_patch_effect": mean(
-            row.get("source_aligned_patch_effect") for row in patches
+        "categorical_flips": sum(
+            bool(row.get("categorical_flip")) for row in positionwise_patches
         ),
+        "flips_toward_correct": sum(
+            bool(row.get("flip_toward_correct")) for row in positionwise_patches
+        ),
+        "flips_away_from_correct": sum(
+            bool(row.get("flip_away_from_correct")) for row in positionwise_patches
+        ),
+        "mean_source_aligned_patch_effect": mean(
+            row.get("source_aligned_patch_effect") for row in positionwise_patches
+        ),
+        "analysis_stratum_counts": {
+            stratum: sum(
+                row.get("analysis_stratum") == stratum
+                for row in positionwise_patches
+            )
+            for stratum in sorted({
+                row.get("analysis_stratum") for row in positionwise_patches
+            })
+        },
         "correlations": correlation_rows,
         "interpretation_note": (
-            "Divergence identifies changed representations; only intervention effects "
-            "provide causal-mechanistic evidence. Correlations are exploratory at this sample size."
+            "Primary causal summaries use only position-aligned replacement. Pooled "
+            "mean-delta interventions, if present, are exported separately and are not "
+            "treated as standard activation patching. High-divergence original-rescue "
+            "cases are primary; medium/low candidates support only exploratory "
+            "divergence-effect assessment, and mirrored/stable cases are controls."
         ),
     }
     atomic_write_json(output_dir / "summary.json", summary)

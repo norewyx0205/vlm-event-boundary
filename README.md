@@ -950,38 +950,57 @@ stage, and can later rebuild its analysis without loading Qwen.
 
 The first Phase 3 experiment is a narrow matched-pair causal pilot. It asks where
 the hidden states of low-boundary and temporal-boundary videos diverge, then tests
-which high-divergence locations causally change the first-answer-token decision.
+whether position-aligned high-divergence locations causally change the
+first-answer-token decision. A small medium/low-divergence comparison set prevents
+the exploratory divergence-effect analysis from being restricted to the top of
+the observed range.
 It does not run RSA/CKA or an exhaustive layer-by-group patch sweep.
 
 ### Design
 
 - Primary temporal-rescue bases: `5,11,14,15,17,19` from `L5_full`.
 - Stable both-correct controls: bases `1,2`.
-- Both `original` and `swapped` prompts are retained.
+- Both `original` and `swapped` prompts are retained, but behaviour is verified
+  separately for each prompt pair. Original temporal-rescue pairs are the primary
+  analysis; swapped pairs are mirrored controls unless they independently satisfy
+  the rescue criterion. Base-level selection and prompt-pair behaviour are stored
+  in separate fields.
 - Hidden states are captured at decoder-layer residual-post for all 36 layers.
 - Coarse groups cover all video tokens, target/distractor ROIs, event phases,
   object mentions, before/after terms, option spans, and the decision position.
 - Pairwise metrics are cosine distance and relative L2 change after explicit
-  mean pooling. Token-wise diagnostics are also retained for aligned groups up
-  to the configured vector limit.
-- Candidate selection ranks locations within each matched pair by the mean of
-  cosine- and relative-L2 descending percentile scores. The default takes six
-  locations with at most one location per token group.
+  mean pooling. Token-wise diagnostics are computed only when the exact input
+  sequence positions are identical; equal tensor shape alone is insufficient.
+  Every row records whether identical positions or an event-relative map supplied
+  the correspondence. This pilot does not implement event-relative mapping.
+- `phase_gap` is explicitly excluded from pairwise divergence and patch selection
+  in this first pilot: low-boundary has no semantically matched inter-event gap.
+  A later analysis must define either an absolute-time control window or an
+  event-relative mapping before testing this phase.
+- Candidate selection ranks position-aligned locations within each matched pair
+  by the mean of cosine- and relative-L2 descending percentile scores. The fixed
+  six-location budget contains four high-divergence primary candidates, one
+  medium-divergence comparison, and one low-divergence comparison, with at most
+  one location per token group.
 - Patching is bidirectional: temporal-to-low recovery and low-to-temporal
-  disruption. Groups with identical sequence positions use position-wise
-  replacement; all other multi-token alignments use an explicitly labelled
-  pooled-mean delta intervention.
+  disruption. The primary causal analysis uses only `positionwise_replace` at
+  identical sequence positions. `pooled_mean_delta`, if explicitly requested in
+  a separate run, is exported as an exploratory group-level mean-shift
+  intervention and is never pooled with standard activation-patching results.
 - The primary behavioural quantity is the correct-minus-incorrect A/B first-token
   logit margin. Categorical answer flips remain secondary.
 
 With the default 8 bases and 2 mirrored prompts, this yields 16 matched pairs,
-7,488 auditable layer/group divergence rows (including explicitly marked missing
-groups), 96 selected locations, and 192 bidirectional patch runs. The first pair
+7,488 auditable layer/group rows (including the explicitly excluded `phase_gap`
+rows), 96 selected locations, and 192 bidirectional patch runs. Thus the
+methodological cleanup does not increase the GPU patch budget. The first pair
 is a fail-fast preflight. Before scaling to the remaining pairs, the patch stage
 also checks a repeated no-patch forward and same-state identity patches.
 
 Position-wise replacement is used only when the source and target groups contain
-the same sequence positions. Each patch row records this alignment assumption.
+the same sequence positions. Each divergence and patch row records this alignment
+assumption, whether event-relative mapping was used, and which intervention family
+the result belongs to.
 The low and temporal videos are still different inputs and Event 2 occurs at a
 different absolute time, so same-position visual patches are a documented first
 pass rather than a claim of perfect event-semantic alignment. The selected-case
@@ -1013,7 +1032,8 @@ python scripts/run_activation_patching.py divergence \
 python scripts/select_activation_patching_candidates.py \
   --divergence_path analysis/activation_patching_phase3/pairwise_divergence.jsonl \
   --output_path analysis/activation_patching_phase3/patch_candidates.jsonl \
-  --top_k_per_pair 6 --max_per_token_group 1
+  --top_k_per_pair 6 --medium_k_per_pair 1 --low_k_per_pair 1 \
+  --max_per_token_group 1 --required_patch_method positionwise_replace
 
 python scripts/run_activation_patching.py patch \
   --manifest_path analysis/activation_patching_phase3/selected_cases.jsonl \
@@ -1038,8 +1058,9 @@ default `--require_complete`, the process exits after checkpointing so rerunning
 the same command retries only unresolved work.
 
 The patch stage also runs no-patch and same-state identity-patch controls on the
-first matched pair. Outputs include raw JSONL, candidate-selection audit,
-configuration and runtime metadata, validation/error records, summary JSON/CSV,
-and four plots covering divergence, patch effects, and exploratory
-divergence-versus-effect relationships. Divergence is descriptive; only a patch
-effect is treated as causal-mechanistic evidence.
+first matched pair. Analysis writes separate position-wise and pooled-mean-delta
+CSVs, and stratifies standard patching by primary original rescue, independently
+rescued swapped prompts, mirrored controls, and stable both-correct controls.
+The high/medium/low candidate labels are retained in the divergence-effect plot.
+Divergence is descriptive; only position-aligned patch effects enter the primary
+causal-mechanistic summaries.
