@@ -755,8 +755,24 @@ def generate_level(level, args, durations, target_identity_specs):
     video_dir.mkdir(parents=True, exist_ok=True)
     annotation_path = level_dir / "annotations.jsonl"
 
-    for stale in video_dir.glob("*.mp4"):
-        stale.unlink()
+    append = getattr(args, "append", False)
+    base_id_start = getattr(args, "base_id_start", 1)
+    conditions = tuple(getattr(args, "conditions", CONDITIONS))
+    if base_id_start < 1 or not conditions or any(item not in CONDITIONS for item in conditions):
+        raise ValueError("Invalid base ID range or boundary condition selection.")
+    if append:
+        existing_rows = (
+            [json.loads(line) for line in annotation_path.read_text(encoding="utf-8").splitlines() if line]
+            if annotation_path.exists() else []
+        )
+        requested_ids = set(range(base_id_start, base_id_start + args.samples_per_level))
+        occupied = {int(row["base_sample_id"]) for row in existing_rows}
+        if requested_ids & occupied:
+            raise ValueError(f"Base sample IDs already exist: {sorted(requested_ids & occupied)}")
+    else:
+        existing_rows = []
+        for stale in video_dir.glob("*.mp4"):
+            stale.unlink()
 
     duration_sec = get_level_duration(level, durations)
     event_duration = int(args.event_duration_sec * args.fps)
@@ -767,7 +783,10 @@ def generate_level(level, args, durations, target_identity_specs):
     feature_variant = getattr(args, "feature_variant", "full")
     if feature_variant not in FEATURE_VARIANTS:
         raise ValueError(f"Unknown feature variant: {feature_variant}")
-    first_object_ids = balanced_binary_sequence(1, 2, args.samples_per_level)
+    extra_first_mover = getattr(args, "extra_first_mover", 1)
+    if extra_first_mover not in (1, 2):
+        raise ValueError("extra_first_mover must be 1 or 2.")
+    first_object_ids = balanced_binary_sequence(extra_first_mover, 3 - extra_first_mover, args.samples_per_level)
     correct_relations = balanced_binary_sequence("before", "after", args.samples_per_level)
     subject_object_ids = (
         balanced_binary_sequence(1, 2, args.samples_per_level)
@@ -775,10 +794,11 @@ def generate_level(level, args, durations, target_identity_specs):
         else None
     )
 
-    for base_id in range(1, args.samples_per_level + 1):
-        first_object_id = first_object_ids[base_id - 1] if level["randomized_targets"] else 1
+    for sample_index in range(args.samples_per_level):
+        base_id = base_id_start + sample_index
+        first_object_id = first_object_ids[sample_index] if level["randomized_targets"] else 1
         identity_spec = apply_feature_variant(
-            target_identity_specs[base_id - 1],
+            target_identity_specs[sample_index],
             feature_variant,
             target_radii=getattr(args, "target_radii", None),
         )
@@ -787,9 +807,9 @@ def generate_level(level, args, durations, target_identity_specs):
         first_obj = object_1 if first_object_id == 1 else object_2
         second_obj = object_2 if first_object_id == 1 else object_1
         if subject_object_ids is None:
-            correct_relation = correct_relations[base_id - 1]
+            correct_relation = correct_relations[sample_index]
         else:
-            subject_object_id = subject_object_ids[base_id - 1]
+            subject_object_id = subject_object_ids[sample_index]
             correct_relation = "before" if subject_object_id == first_object_id else "after"
         correct_relation, incorrect_relation, correct_sentence, incorrect_sentence = make_sentence_pair(
             first_obj,
@@ -810,7 +830,7 @@ def generate_level(level, args, durations, target_identity_specs):
             moving_count_override=getattr(args, "moving_count_override", None),
         )
 
-        for condition in CONDITIONS:
+        for condition in conditions:
             include_unrelated = level["include_unrelated_later_motion"] and not args.disable_unrelated_later_motion
             timing = get_timing(
                 condition,
@@ -956,12 +976,13 @@ def generate_level(level, args, durations, target_identity_specs):
 
             all_rows.extend(make_eval_rows(video_annotation))
 
-    for stale in video_dir.glob("*.mp4"):
-        if stale.name not in expected_video_names:
-            stale.unlink()
+    if not append:
+        for stale in video_dir.glob("*.mp4"):
+            if stale.name not in expected_video_names:
+                stale.unlink()
 
     with open(annotation_path, "w", encoding="utf-8") as f:
-        for row in all_rows:
+        for row in existing_rows + all_rows:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     print(f"{level['difficulty_name']}: wrote {len(all_rows)} eval rows to {annotation_path}")

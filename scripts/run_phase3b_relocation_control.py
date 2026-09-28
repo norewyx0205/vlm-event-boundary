@@ -1,0 +1,250 @@
+"""Preflight cross-position control with codec-matched global event relocation."""
+
+import argparse
+import copy
+import hashlib
+import json
+from collections import defaultdict
+from importlib.metadata import version
+from pathlib import Path
+
+import cv2
+import torch
+import transformers
+
+try:
+    from .activation_patching_core import atomic_write_json, atomic_write_jsonl
+    from .common import PROJECT_ROOT, read_jsonl
+    from .phase3b_core import VIDEO_GROUPS, build_pair_mappings, prepare_example
+    from .run_eval import configure_reproducibility, load_model
+    from .run_phase3b_patching import (
+        _capture_all_layers, activation_root, load_capture, patch_forward,
+        repo_commit, validate_patch_controls,
+    )
+except ImportError:
+    from activation_patching_core import atomic_write_json, atomic_write_jsonl
+    from common import PROJECT_ROOT, read_jsonl
+    from phase3b_core import VIDEO_GROUPS, build_pair_mappings, prepare_example
+    from run_eval import configure_reproducibility, load_model
+    from run_phase3b_patching import (
+        _capture_all_layers, activation_root, load_capture, patch_forward,
+        repo_commit, validate_patch_controls,
+    )
+
+
+def decode_frames(path):
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise RuntimeError(f"Cannot decode {path}.")
+    fps = capture.get(cv2.CAP_PROP_FPS)
+    frames = []
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            break
+        frames.append(frame)
+    capture.release()
+    if not frames:
+        raise RuntimeError(f"No frames decoded from {path}.")
+    return frames, fps
+
+
+def encode_frames(path, frames, fps):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    height, width = frames[0].shape[:2]
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
+    if not writer.isOpened():
+        raise RuntimeError(f"Cannot encode {path}.")
+    try:
+        for frame in frames:
+            writer.write(frame)
+    finally:
+        writer.release()
+
+
+def shifted_row(row, path, shift_frames):
+    changed = copy.deepcopy(row)
+    changed["video_path"] = str(path)
+    changed["video_id"] = Path(path).name
+    changed["eval_id"] = row["eval_id"] + f"_shift_{shift_frames}"
+    for obj in changed["target_objects"] + changed.get("distractors", []):
+        for key in ("start_frame", "end_frame"):
+            if isinstance(obj.get(key), int) and obj[key] >= 0:
+                obj[key] += shift_frames
+    for section in ("event_timing", "boundary_timing"):
+        for key, value in changed.get(section, {}).items():
+            if key.endswith("_frame") and isinstance(value, int):
+                changed[section][key] += shift_frames
+    changed.pop("archived_prediction", None)
+    changed.pop("archived_input_metadata", None)
+    return changed
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--manifest_path", required=True)
+    parser.add_argument("--output_dir", required=True)
+    parser.add_argument("--project_root", default=str(PROJECT_ROOT))
+    parser.add_argument("--model_name", default="Qwen/Qwen3-VL-8B-Instruct")
+    parser.add_argument("--model_revision", default="0c351dd01ed87e9c1b53cbc748cba10e6187ff3b")
+    parser.add_argument("--max_cases", type=int, default=2)
+    parser.add_argument("--shift_frames", type=int, default=15)
+    parser.add_argument("--video_fps", type=float, default=None)
+    parser.add_argument("--video_num_frames", type=int, default=None)
+    parser.add_argument("--video_max_pixels", type=int, default=None)
+    parser.add_argument("--roi_padding", type=int, default=8)
+    parser.add_argument("--min_mapping_coverage", type=float, default=0.5)
+    parser.add_argument("--layers", default="0,16,32")
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
+    if args.shift_frames < 1 or args.max_cases < 1:
+        parser.error("shift_frames and max_cases must be positive.")
+    rows = [row for row in read_jsonl(args.manifest_path) if row["condition"] == "low_boundary"][:args.max_cases]
+    if not rows:
+        parser.error("Manifest contains no low-boundary cases.")
+    layers = [int(part) for part in args.layers.split(",")]
+    if any(layer not in range(0, 36, 4) for layer in layers):
+        parser.error("Relocation layers must belong to the fixed 0,4,...,32 grid.")
+    configure_reproducibility(args.seed, deterministic=True)
+    output_dir = Path(args.output_dir)
+    fingerprint = hashlib.sha256(json.dumps({
+        "schema": "phase3b_temporal_relocation_control_v1",
+        "source_commit": repo_commit(),
+        "code_sha256": {
+            name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
+            for name in ("run_phase3b_relocation_control.py", "phase3b_core.py", "run_phase3b_patching.py")
+        },
+        "model_name": args.model_name, "revision": args.model_revision,
+        "transformers_version": transformers.__version__,
+        "torch_version": torch.__version__,
+        "qwen_vl_utils_version": version("qwen-vl-utils"),
+        "video_fps": args.video_fps, "video_num_frames": args.video_num_frames,
+        "video_max_pixels": args.video_max_pixels, "roi_padding": args.roi_padding,
+        "min_mapping_coverage": args.min_mapping_coverage,
+        "shift_frames": args.shift_frames, "seed": args.seed, "layers": layers,
+        "source_ids": [row["eval_id"] for row in rows],
+    }, sort_keys=True).encode()).hexdigest()
+    config_path = output_dir / "relocation_config.json"
+    if config_path.exists():
+        prior = json.loads(config_path.read_text(encoding="utf-8"))
+        if prior.get("fingerprint") != fingerprint:
+            raise RuntimeError("Existing relocation control has a different configuration fingerprint.")
+        if (output_dir / "relocation_audit.jsonl").is_file() and (
+            output_dir / "temporal_relocation_control.jsonl"
+        ).is_file() and (output_dir / "relocation_summary.json").is_file():
+            print("Relocation control is already complete; reusing the saved output.")
+            return
+    model, processor = load_model(
+        args.model_name, model_revision=args.model_revision, attn_implementation="eager"
+    )
+    results = []
+    audits = []
+    for row in rows:
+        pair_id = row["phase3b_pair_id"]
+        original = Path(args.project_root) / row["video_path"]
+        if not original.exists():
+            original = Path(row["video_path"])
+        frames, fps = decode_frames(original)
+        if args.shift_frames >= len(frames) - max(
+            obj["end_frame"] for obj in row["target_objects"]
+        ):
+            raise RuntimeError(f"No safe post-event tail for {pair_id} relocation.")
+        tail_difference = max(
+            float(cv2.absdiff(frame, frames[-1]).mean())
+            for frame in frames[-args.shift_frames:]
+        )
+        if tail_difference > 3:
+            raise RuntimeError(f"Tail is not stationary for {pair_id}; mean difference={tail_difference}.")
+        case_dir = output_dir / "videos" / pair_id
+        base_video = case_dir / "reencoded_base.mp4"
+        shifted_video = case_dir / "reencoded_shifted.mp4"
+        if not base_video.exists():
+            encode_frames(base_video, frames, fps)
+        if not shifted_video.exists():
+            encode_frames(shifted_video, [frames[0]] * args.shift_frames + frames[:-args.shift_frames], fps)
+        base_row = copy.deepcopy(row)
+        base_row.update({"video_path": str(base_video), "video_id": base_video.name,
+                         "eval_id": row["eval_id"] + "_reencoded"})
+        base_row.pop("archived_prediction", None)
+        base_row.pop("archived_input_metadata", None)
+        shift_row = shifted_row(row, shifted_video, args.shift_frames)
+        prepared = {
+            "base": prepare_example(base_row, processor, args.project_root, args.video_fps,
+                                    args.video_num_frames, args.video_max_pixels, args.roi_padding, model.device),
+            "shifted": prepare_example(shift_row, processor, args.project_root, args.video_fps,
+                                       args.video_num_frames, args.video_max_pixels, args.roi_padding, model.device),
+        }
+        mappings = build_pair_mappings(prepared["base"], prepared["shifted"], args.min_mapping_coverage)
+        pair_roots = {
+            condition: activation_root(output_dir, pair_id, condition)
+            for condition in ("base", "shifted")
+        }
+        for condition in ("base", "shifted"):
+            _capture_all_layers(model, processor, prepared[condition], pair_roots[condition], fingerprint, True)
+        controls = {condition: validate_patch_controls(
+            model, processor, prepared[condition], pair_roots[condition]
+        ) for condition in ("base", "shifted")}
+        audits.append({
+            "pair_id": pair_id, "shift_frames": args.shift_frames,
+            "tail_mean_absolute_difference": tail_difference,
+            "mapping": mappings, "identity_controls": controls,
+        })
+        atomic_write_jsonl(output_dir / "relocation_audit.jsonl", audits)
+        for group in VIDEO_GROUPS:
+            mapping = mappings[group]
+            if not mapping["eligible"]:
+                continue
+            for layer in layers:
+                for direction, source_name, target_name, source_positions, target_positions in (
+                    ("base_to_shifted", "base", "shifted", mapping["source_positions"], mapping["target_positions"]),
+                    ("shifted_to_base", "shifted", "base", mapping["target_positions"], mapping["source_positions"]),
+                ):
+                    source_values = load_capture(pair_roots[source_name], layer, source_positions)
+                    _, patched = patch_forward(
+                        model, processor, prepared[target_name], layer, target_positions, source_values
+                    )
+                    target_index = json.loads((pair_roots[target_name] / "index.json").read_text(encoding="utf-8"))
+                    results.append({
+                        "pair_id": pair_id, "group": group, "layer": layer, "direction": direction,
+                        "absolute_temporal_shift_frames": args.shift_frames,
+                        "source_positions": source_positions, "target_positions": target_positions,
+                        "mapping_coverage_source": mapping["source_coverage"],
+                        "mapping_coverage_target": mapping["target_coverage"],
+                        "baseline_margin": target_index["decision"]["margin"],
+                        "baseline_prediction": target_index["decision"]["prediction"],
+                        "patched_margin": patched["margin"],
+                        "patched_prediction": patched["prediction"],
+                        "categorical_flip": patched["prediction"] != target_index["decision"]["prediction"],
+                        "margin_change": patched["margin"] - target_index["decision"]["margin"],
+                    })
+                    atomic_write_jsonl(output_dir / "temporal_relocation_control.jsonl", results)
+    atomic_write_json(output_dir / "relocation_config.json", {
+        "model_name": args.model_name, "model_revision": args.model_revision,
+        "fingerprint": fingerprint, "shift_frames": args.shift_frames,
+        "layers": layers, "case_count": len(rows),
+    })
+    grouped = defaultdict(list)
+    for item in results:
+        grouped[(item["group"], item["layer"], item["direction"])].append(item)
+    summary = [
+        {
+            "group": group, "layer": layer, "direction": direction,
+            "n": len(items),
+            "mean_margin_change": sum(item["margin_change"] for item in items) / len(items),
+            "mean_absolute_margin_change": sum(abs(item["margin_change"]) for item in items) / len(items),
+            "max_absolute_margin_change": max(abs(item["margin_change"]) for item in items),
+            "categorical_flips": sum(bool(item["categorical_flip"]) for item in items),
+        }
+        for (group, layer, direction), items in sorted(grouped.items())
+    ]
+    atomic_write_json(output_dir / "relocation_summary.json", {
+        "schema": "phase3b_temporal_relocation_control_v1",
+        "fingerprint": fingerprint, "case_count": len(rows),
+        "patch_rows": len(results), "by_group_layer_direction": summary,
+    })
+    print(f"Wrote {len(results)} temporal relocation patch rows to {output_dir}.")
+
+
+if __name__ == "__main__":
+    main()

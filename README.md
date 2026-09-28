@@ -1079,3 +1079,114 @@ rescued swapped prompts, mirrored controls, and stable both-correct controls.
 The high/medium/low candidate labels are retained in the divergence-effect plot.
 Divergence is descriptive; only position-aligned patch effects enter the primary
 causal-mechanistic summaries.
+
+## Phase 3B: Scaled Rescue and Video-Token Patching
+
+Phase 3B is a separate schema and does not replace the Phase 3A pilot. It screens
+new `L5_full` videos under a fixed budget of 300 new base samples, using only
+`low_boundary` and `temporal_boundary` with both mirrored prompts. Batches are
+five bases by default; completed batches are reused after interruption. Screening
+stops at 60 **mapping-eligible independent rescue bases** or at the 300-base cap.
+The processor-only audit occurs before the 50-case primary cohort is frozen.
+If fewer than 50 eligible cases are found at the cap, the cohort is not silently
+filled with non-rescues. Original/A and swapped/B rescues are counted separately;
+a 25A+25B extension is created only if enough B-rescues arise naturally.
+
+The frozen analysis manifest includes 50 primary rescues, up to 5 opposite
+prompt pairs, and up to 10 stable-both-correct controls by default. Opposite prompts that
+independently rescue are labelled separately from mirrored controls; each pair
+retains its own behavioral classification. A separate two-case preflight chooses
+one `target_1`-first and one `target_2`-first primary case.
+
+Six visual groups represent literal target/distractor identity by Event 1/2.
+The four first-/second-mover roles are derived per case from `first_object_id`,
+never inferred from target ID. The text groups distinguish the generic query,
+A/B option bodies, target mentions inside those options, before/after terms,
+and the final answer-predicting prompt position. Visual tokens are assigned
+exclusively to one ROI and mapped one-to-one by event-relative temporal progress
+and merged spatial cell. Cases failing mapping coverage or alignment are
+ineligible; there is no pooled-mean fallback. Distractor patches are labelled
+aggregate-distractor interventions because individual distractor identity is
+not aligned across the videos.
+
+For every selected condition, all 36 residual-post decoder layers are captured
+as per-token vectors, token indices, counts, and pooled group means. Patching
+uses layers `0,4,...,32` plus layer 35 for `decision_position` only. Video
+groups use explicit `event_relative_replace`; query, options, and decision use
+`positionwise_replace`. Both temporal-to-low and low-to-temporal directions are
+run. The primary outcome is the correct-minus-incorrect first-token A/B logit
+margin, with categorical flips secondary. Same-state identity patches are
+technical no-op controls; a separate preflight global temporal-relocation
+control tests cross-position effects. These are decoder residual-stream
+interventions at visual-token positions, **not** vision-encoder patches.
+CPU analysis writes all-layer divergence and fixed-grid causal heatmaps, plus
+representative Target-1-first and Target-2-first activation-norm trajectories.
+
+### Colab workflow
+
+In `notebooks/colab_eval.ipynb`, set only
+`EXPERIMENT_MODE_OVERRIDES["activation_patching_phase3b"] = "run"`; keep old
+experiments at `skip`/`reuse`. Upload the frozen `0922_phase3_output.zip` archive
+to `/content` (or edit `ARTIFACT_ARCHIVES` to its exact uploaded path) before
+screening. Advance `PHASE3B_STAGE` explicitly:
+
+1. `screen`: batched generation/evaluation, processor mapping audit, and frozen
+   selection. Re-running resumes completed batches.
+2. `preflight`: two first-mover-balanced cases, technical controls, patching,
+   analysis, and a temporal-relocation control.
+3. `full`: five-case independent shards for the frozen primary and secondary
+   analysis cohorts, followed by CPU analysis. Requires a completed preflight.
+
+The notebook mounts Google Drive for every active Phase 3B mode. Its default
+`/content/drive/MyDrive/vlm_phase3b` root persists the generated video pool,
+batch evaluation results, screening/mapping audits, and GPU activation
+checkpoints across Colab sessions. The ordinary timestamped download ZIP
+contains lightweight behavioral results, selection/mapping audits, analyses,
+figures, and provenance, but deliberately excludes large `.pt` activation
+tensors and `.mp4` videos. The ZIP alone cannot resume video patching; keep
+the Drive video pool and activation directory as the underlying records.
+Reuse the same
+repository commit, model revision, manifests, and mapping file when resuming a
+shard; the fingerprint also includes key source-file hashes, so uncommitted
+code changes cannot silently reuse old captures. A mismatch is rejected.
+At the full 300-new-base screening cap, the new pool has at most 1,200 prompt
+evaluations. The fixed grid has 218 bidirectional patches per matched pair:
+10,900 for 50 primary rescues, plus up to 3,270 for the default 15 secondary
+cases. The preflight should be inspected before committing to that GPU cost.
+
+### Standalone entry points
+
+```bash
+python scripts/run_phase3b_screening.py \
+  --existing_annotation_path data/l5_feature_ablation_v1/L5_full/annotations.jsonl \
+  --existing_result_path results/<model>/l5_feature_ablation_v1_main_L5_full/<run>/raw_results.jsonl \
+  --model_name Qwen/Qwen3-VL-8B-Instruct
+
+python scripts/select_phase3b_cases.py \
+  --annotation_paths <existing-annotations> <batch-annotations...> \
+  --result_paths <existing-results> <batch-results...> \
+  --mapping_path analysis/phase3b/mapping_audit/video_mapping_manifest.jsonl \
+  --output_dir analysis/phase3b/selection
+
+python scripts/run_phase3b_patching.py --stage capture \
+  --manifest_path analysis/phase3b/selection/preflight_case_manifest.jsonl \
+  --mapping_path analysis/phase3b/selection/selected_video_mappings.jsonl \
+  --output_dir <persistent-checkpoint-root>/preflight --shard_index 0
+
+python scripts/run_phase3b_patching.py --stage patch \
+  --manifest_path analysis/phase3b/selection/preflight_case_manifest.jsonl \
+  --mapping_path analysis/phase3b/selection/selected_video_mappings.jsonl \
+  --output_dir <persistent-checkpoint-root>/preflight --shard_index 0
+
+python scripts/analyze_phase3b.py \
+  --manifest_path analysis/phase3b/selection/preflight_case_manifest.jsonl \
+  --shards_root <persistent-checkpoint-root>/preflight \
+  --output_dir analysis/phase3b/preflight_analysis
+```
+
+The `screening_progress.json` file lists the exact annotation/result paths for
+case selection. Phase 3B analysis treats a base sample, not a decoder layer or
+mirrored prompt, as the unit of inference. The selective rescue cohort and
+small preflight are exploratory; bootstrap intervals are diagnostic rather
+than population-level confirmation. Full Qwen3-VL execution requires the pinned
+Colab runtime and a GPU; local unit tests do not validate model behavior.

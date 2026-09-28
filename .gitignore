@@ -11,6 +11,8 @@ __pycache__/
 #data/ladder_v*/
 scripts/data/
 results/
+data/phase3b_rescue_pool/
+analysis/phase3b/
 
 # Generated legacy video datasets
 synthetic_boundary_videos/videos/

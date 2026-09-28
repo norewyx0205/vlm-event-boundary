@@ -29,6 +29,7 @@ EXPERIMENT_ALLOWED_MODES = {
     "attention_phase0": set(VALID_MODES),
     "attention_phase1": set(VALID_MODES),
     "activation_patching_phase3": set(VALID_MODES),
+    "activation_patching_phase3b": set(VALID_MODES),
 }
 
 
@@ -44,6 +45,7 @@ PROFILE_MODES = {
         ladder_smoke="skip",
         attention_phase0="skip",
         activation_patching_phase3="skip",
+        activation_patching_phase3b="skip",
     ),
     "analysis_only": _profile(
         default="analyze",
@@ -51,11 +53,13 @@ PROFILE_MODES = {
         synthetic="reuse",
         ladder_smoke="skip",
         activation_patching_phase3="skip",
+        activation_patching_phase3b="skip",
     ),
     "full_reproduction": _profile(
         default="run",
         ladder_smoke="skip",
         activation_patching_phase3="skip",
+        activation_patching_phase3b="skip",
     ),
     "smoke": _profile(
         ladder_smoke="run",
