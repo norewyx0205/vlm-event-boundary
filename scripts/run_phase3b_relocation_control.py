@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import math
+import time
 from collections import defaultdict
 from importlib.metadata import version
 from pathlib import Path
@@ -159,6 +160,7 @@ def main():
     if any(layer not in range(0, 36, 4) for layer in layers):
         parser.error("Relocation layers must belong to the fixed 0,4,...,32 grid.")
     configure_reproducibility(args.seed, deterministic=True)
+    started = time.perf_counter()
     output_dir = Path(args.output_dir)
     source_paths = {}
     source_hashes = {}
@@ -200,13 +202,28 @@ def main():
         ).is_file() and (output_dir / "relocation_summary.json").is_file():
             print("Relocation control is already complete; reusing the saved output.")
             return
+    shift_summary = ", ".join(
+        f"{row['phase3b_pair_id']}: {shift}" for row, shift in pairs
+    )
+    print(
+        f"Phase 3B relocation: {len(pairs)} matched pairs; "
+        f"Event 2 shifts={shift_summary}; "
+        f"checkpoint={output_dir}",
+        flush=True,
+    )
     model, processor = load_model(
         args.model_name, model_revision=args.model_revision, attn_implementation="eager"
     )
+    print(f"Relocation model loaded after {(time.perf_counter() - started) / 60:.1f} min", flush=True)
     results = []
     audits = []
-    for row, shift_frames in pairs:
+    for case_index, (row, shift_frames) in enumerate(pairs, 1):
         pair_id = row["phase3b_pair_id"]
+        print(
+            f"Relocation case {case_index}/{len(pairs)}: {pair_id}, "
+            f"Event 2 shift={shift_frames} frames; elapsed={(time.perf_counter() - started) / 60:.1f} min",
+            flush=True,
+        )
         original = source_paths[pair_id]
         frames, fps = decode_frames(original)
         if shift_frames >= len(frames) - max(
@@ -279,6 +296,11 @@ def main():
             "reencode_parity": codec_parity,
         })
         atomic_write_jsonl(output_dir / "relocation_audit.jsonl", audits)
+        print(
+            f"  Codec/mapping audit checkpointed; prediction_match={codec_parity['prediction_match']}; "
+            f"PSNR={codec_psnr}; elapsed={(time.perf_counter() - started) / 60:.1f} min",
+            flush=True,
+        )
         if not codec_parity["prediction_match"]:
             raise RuntimeError(f"Re-encoding changed the prediction for {pair_id}; relocation is uninterpretable.")
         for group in (name for name in VIDEO_GROUPS if name.endswith("_e2")):
@@ -309,6 +331,11 @@ def main():
                         "margin_change": patched["margin"] - target_index["decision"]["margin"],
                     })
                     atomic_write_jsonl(output_dir / "temporal_relocation_control.jsonl", results)
+            print(
+                f"  {pair_id} {group}: {len(results)} patch rows checkpointed; "
+                f"elapsed={(time.perf_counter() - started) / 60:.1f} min",
+                flush=True,
+            )
     atomic_write_json(output_dir / "relocation_config.json", {
         "model_name": args.model_name, "model_revision": args.model_revision,
         "fingerprint": fingerprint,
@@ -338,7 +365,11 @@ def main():
         "reencode_parity_by_pair": {item["pair_id"]: item["reencode_parity"] for item in audits},
         "patch_rows": len(results), "by_group_layer_direction": summary,
     })
-    print(f"Wrote {len(results)} temporal relocation patch rows to {output_dir}.")
+    print(
+        f"Wrote {len(results)} temporal relocation patch rows to {output_dir} "
+        f"in {(time.perf_counter() - started) / 60:.1f} min.",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

@@ -49,6 +49,20 @@ def annotation(base, condition, variant):
 
 
 class Phase3BTest(unittest.TestCase):
+    def test_screening_status_checkpoint_and_heartbeat(self):
+        with tempfile.TemporaryDirectory() as directory:
+            reporter = run_phase3b_screening.ScreeningProgress(
+                directory, max_new_bases=300, stop_eligible_bases=60,
+                heartbeat_sec=0.02,
+            )
+            reporter.update("evaluate new batch", current_batch="batch_031_035", evaluated_new_bases=5)
+            run_phase3b_screening.run(["-c", "import time; time.sleep(0.06)"], reporter)
+            status = json.loads((Path(directory) / "screening_status.json").read_text())
+            self.assertEqual(status["stage"], "evaluate new batch")
+            self.assertEqual(status["current_batch"], "batch_031_035")
+            self.assertEqual(status["evaluated_new_bases"], 5)
+            self.assertGreater(status["session_elapsed_sec"], 0)
+
     def test_relocation_uses_matched_event_two_displacement(self):
         low = annotation(1, "low_boundary", "original")
         temporal = annotation(1, "temporal_boundary", "original")
@@ -92,6 +106,41 @@ class Phase3BTest(unittest.TestCase):
             }))
             with self.assertRaisesRegex(RuntimeError, "generator_code_sha256"):
                 run_phase3b_screening.validate_pool_provenance(root, 42, 300)
+
+    def test_screening_budget_extension_preserves_pool_and_records_amendment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pool = root / "rescue_pool"
+            pool.mkdir()
+            config_path = pool / "phase3b_generation_config.json"
+            config_path.write_text(json.dumps({
+                "schema": "phase3b_rescue_pool_v1",
+                "generator_code_sha256": {
+                    name: hashlib.sha256((Path("scripts") / name).read_bytes()).hexdigest()
+                    for name in ("generate_phase3b_rescue_pool.py", "generate_ladder_dataset.py")
+                },
+                "seed": 42, "max_new_bases": 300,
+                "conditions": ["low_boundary", "temporal_boundary"],
+            }))
+            analysis = root / "analysis"
+            analysis.mkdir()
+            (analysis / "screening_progress.json").write_text(json.dumps({"eligible_rescue_base_count": 37}))
+            with self.assertRaisesRegex(RuntimeError, "--extend_existing_budget"):
+                run_phase3b_screening.validate_pool_provenance(pool, 42, 450, output_root=analysis)
+            run_phase3b_screening.validate_pool_provenance(
+                pool, 42, 450, allow_budget_extension=True, output_root=analysis,
+            )
+            self.assertEqual(json.loads(config_path.read_text())["max_new_bases"], 450)
+            amendment_path = pool / "budget_amendments.json"
+            amendments = json.loads(amendment_path.read_text())
+            self.assertEqual(len(amendments), 1)
+            self.assertEqual(amendments[0]["eligible_rescue_bases_at_amendment"], 37)
+            run_phase3b_screening.validate_pool_provenance(pool, 42, 450, output_root=analysis)
+            self.assertEqual(json.loads(amendment_path.read_text()), amendments)
+            with self.assertRaisesRegex(RuntimeError, "requested=300"):
+                run_phase3b_screening.validate_pool_provenance(
+                    pool, 42, 300, allow_budget_extension=True, output_root=analysis,
+                )
 
     def test_representatives_are_frozen_without_patch_outputs(self):
         selected = [
@@ -287,6 +336,46 @@ class Phase3BTest(unittest.TestCase):
             mirrored = [row for row in low if row["phase3b_analysis_stratum"] == "mirrored_prompt_control"]
             self.assertEqual(len(mirrored), 2)
             self.assertTrue(all(row["phase3b_prompt_pair_behavior"] == "stable_both_correct" for row in mirrored))
+
+    def test_two_case_technical_preflight_freezes_both_first_movers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            annotations, results, mappings = [], [], []
+            for base in (1, 2):
+                for variant in ("original", "swapped"):
+                    mappings.append({"base_sample_id": base, "prompt_variant": variant, "eligible": True})
+                    for condition in ("low_boundary", "temporal_boundary"):
+                        row = annotation(base, condition, variant)
+                        row["first_object_id"] = base
+                        annotations.append(row)
+                        correct = condition == "temporal_boundary" if variant == "original" else True
+                        results.append({
+                            "eval_id": row["eval_id"], "base_sample_id": base,
+                            "feature_variant": "full", "condition": condition,
+                            "video_path": row["video_path"], "correct_option": row["correct_option"],
+                            "prediction": row["correct_option"] if correct else "B",
+                            "is_correct": correct,
+                        })
+            for name, rows in (("annotations", annotations), ("results", results), ("mappings", mappings)):
+                (root / f"{name}.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+            technical = root / "technical_preflight_selection"
+            subprocess.run([
+                sys.executable, "scripts/select_phase3b_cases.py",
+                "--annotation_paths", str(root / "annotations.jsonl"),
+                "--result_paths", str(root / "results.jsonl"),
+                "--mapping_path", str(root / "mappings.jsonl"),
+                "--output_dir", str(technical),
+                "--primary_count", "2", "--reserve_count", "0",
+                "--control_count", "0", "--mirrored_count", "0",
+                "--selection_purpose", "technical_preflight",
+            ], check=True, capture_output=True, text=True)
+            summary = json.loads((technical / "case_selection_summary.json").read_text())
+            self.assertEqual(summary["selection_purpose"], "technical_preflight")
+            self.assertEqual(summary["requested_primary_count"], 2)
+            self.assertEqual(set(summary["preflight_first_movers"]), {1, 2})
+            self.assertEqual(len((technical / "preflight_case_manifest.jsonl").read_text().splitlines()), 4)
+            self.assertEqual(len((technical / "selected_video_mappings.jsonl").read_text().splitlines()), 2)
+            self.assertFalse((root / "selection/case_selection_summary.json").exists())
 
     def test_prompt_pair_category_is_rechecked_from_live_margins(self):
         pair = {"low_boundary": {"phase3b_prompt_pair_behavior": "stable_both_correct"}}

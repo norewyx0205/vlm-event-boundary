@@ -1083,10 +1083,14 @@ causal-mechanistic summaries.
 ## Phase 3B: Scaled Rescue and Video-Token Patching
 
 Phase 3B is a separate schema and does not replace the Phase 3A pilot. It screens
-new `L5_full` videos under a fixed budget of 300 new base samples, using only
-`low_boundary` and `temporal_boundary` with both mirrored prompts. Batches are
-five bases by default; completed batches are reused after interruption. Screening
-stops at 60 **mapping-eligible independent rescue bases** or at the 300-base cap.
+new `L5_full` videos using only `low_boundary` and `temporal_boundary` with both
+mirrored prompts. The original pre-specified screen allowed 300 new base samples
+and targeted 60 mapping-eligible rescues. After exhausting that cap with fewer
+than 50 rescues, the current notebook explicitly amends the cap to 500 new bases
+and stops at 50 **mapping-eligible independent rescue bases**. The amendment is
+recorded in `rescue_pool/budget_amendments.json`; it is not presented as part of
+the original pre-specified budget. Batches contain five bases by default, and
+completed batches are reused after interruption.
 The processor-only audit occurs before the 50-case primary cohort is frozen.
 If fewer than 50 eligible cases are found at the cap, the cohort is not silently
 filled with non-rescues. Original/A and swapped/B rescues are counted separately;
@@ -1136,19 +1140,37 @@ representative Target-1-first and Target-2-first activation-norm trajectories.
 
 In `notebooks/colab_eval.ipynb`, set only
 `EXPERIMENT_MODE_OVERRIDES["activation_patching_phase3b"] = "run"`; keep old
-experiments at `skip`/`reuse`. Upload the frozen `0922_phase3_output.zip` archive
-to `/content` (or edit `ARTIFACT_ARCHIVES` to its exact uploaded path) before
-screening. Advance `PHASE3B_STAGE` explicitly:
+experiments at `skip`/`reuse`. The frozen `0922_phase3_output.zip` archive is
+loaded from the repository root. Include that file when committing/pushing to
+GitHub so a fresh Colab clone can restore it; otherwise set
+`ARTIFACT_ARCHIVES` to an existing Colab/Drive path. Advance
+`PHASE3B_STAGE` explicitly:
 
 1. `screen`: batched generation/evaluation, processor mapping audit, and frozen
-selection. Re-running resumes completed batches.
+   selection. Re-running with the amended budget resumes completed batches;
+   it does not regenerate or re-evaluate the existing 300 new bases. The cell prints the current
+   batch, elapsed time, evaluated-new-base count, and last audited eligible
+   rescue count. A heartbeat updates
+   `/content/drive/MyDrive/vlm_phase3b/analysis/screening_status.json` every
+   60 seconds while a child step is running; the separate
+   `screening_progress.json` records the latest *completed* mapping audit.
    Before reusing a Drive pool, screening checks the saved generation settings
    and generator-code hashes. A changed generator or missing config requires a
    new pool directory rather than silently mixing stimuli.
 2. `preflight`: two first-mover-balanced cases, technical controls, patching,
-   analysis, and a temporal-relocation control.
+   analysis, and a temporal-relocation control. If screening exhausted its
+   budget below 50 eligible rescues, this stage freezes a separate
+   `technical_preflight_selection` from the saved screening and mapping audit.
+   Its checkpoints and analyses use `technical_*` directories; it does not
+   create or substitute for the formal primary cohort. Running this stage
+   does not re-run screening.
 3. `full`: five-case independent shards for the frozen primary and secondary
-   analysis cohorts, followed by CPU analysis. Requires a completed preflight.
+   analysis cohorts, followed by CPU analysis. Requires 50 formally frozen
+   independent primary rescues and a preflight from that formal selection;
+   technical preflight outputs cannot satisfy this gate. If screening ends
+   below 50, review and amend the screening budget before attempting `full`.
+   Capture and patch stages report pair/shard timing and the current checkpoint
+   path; patching logs its completed-location count every three token groups.
 
 The notebook mounts Google Drive for every active Phase 3B mode. Its default
 `/content/drive/MyDrive/vlm_phase3b` root persists the generated video pool,
@@ -1162,7 +1184,7 @@ Reuse the same
 repository commit, model revision, manifests, and mapping file when resuming a
 shard; the fingerprint also includes key source-file hashes, so uncommitted
 code changes cannot silently reuse old captures. A mismatch is rejected.
-At the full 300-new-base screening cap, the new pool has at most 1,200 prompt
+At the amended 500-new-base screening cap, the new pool has at most 2,000 prompt
 evaluations. The fixed grid has 218 bidirectional patches per matched pair:
 10,900 for 50 primary rescues, plus up to 3,270 for the default 15 secondary
 cases. The preflight should be inspected before committing to that GPU cost.

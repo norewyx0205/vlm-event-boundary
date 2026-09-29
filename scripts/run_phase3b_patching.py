@@ -336,7 +336,9 @@ def direction_patch_rows(pair_id, direction, pair, mapping, root, model, process
     errors = json.loads(errors_path.read_text(encoding="utf-8")) if errors_path.exists() else []
     low_margin = (target_decision if target_condition == "low_boundary" else source_decision)["margin"]
     temporal_margin = (target_decision if target_condition == "temporal_boundary" else source_decision)["margin"]
-    for group in GROUPS:
+    started = time.perf_counter()
+    planned_count = len(GROUPS) * len(PATCH_LAYERS) + 1
+    for group_index, group in enumerate(GROUPS, 1):
         low_positions, temporal_positions, method = aligned_positions(
             group,
             target_index if target_condition == "low_boundary" else source_index,
@@ -400,6 +402,12 @@ def direction_patch_rows(pair_id, direction, pair, mapping, root, model, process
                 atomic_write_json(errors_path, errors)
                 if not continue_on_error:
                     raise
+        if group_index % 3 == 0 or group_index == len(GROUPS):
+            print(
+                f"  {pair_id} {direction}: {len(completed)}/{planned_count} patches checkpointed "
+                f"after {(time.perf_counter() - started) / 60:.1f} min | {result_path}",
+                flush=True,
+            )
     unresolved = [
         error for error in errors
         if not any(layer == error["layer"] and group == error["group"] for layer, group, _ in completed)
@@ -452,6 +460,7 @@ def run_capture_stage(args, model, processor, pairs, mappings, root, fingerprint
     completed = 0
     for index, (pair_id, pair) in enumerate(pairs.items(), 1):
         print(f"Capture {index}/{len(pairs)}: {pair_id}", flush=True)
+        pair_started = time.perf_counter()
         try:
             mapping = mappings[pair_id]
             if not mapping["eligible"]:
@@ -460,6 +469,7 @@ def run_capture_stage(args, model, processor, pairs, mappings, root, fingerprint
             divergence_path = Path(root) / "divergence" / f"{pair_id}.jsonl"
             if all(capture_complete(path, fingerprint) for path in roots.values()) and divergence_path.is_file():
                 completed += 1
+                print(f"  Reused capture checkpoint: {divergence_path}", flush=True)
                 continue
             prepared = prepare_pair(pair, processor, args, model.device)
             for condition in ("low_boundary", "temporal_boundary"):
@@ -474,6 +484,11 @@ def run_capture_stage(args, model, processor, pairs, mappings, root, fingerprint
             validate_behavioral_category(pair, low_index, temporal_index)
             atomic_write_jsonl(divergence_path, divergence_for_case(pair_id, root, mapping, fingerprint))
             completed += 1
+            print(
+                f"  Capture checkpoint {completed}/{len(pairs)} saved after "
+                f"{(time.perf_counter() - pair_started) / 60:.1f} min | {divergence_path}",
+                flush=True,
+            )
             _load_layer.cache_clear()
             if args.empty_cache_each_pair and torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -500,6 +515,7 @@ def run_patch_stage(args, model, processor, pairs, mappings, root, fingerprint):
     selected_directions = [item for item in directions if args.direction in ("both", item[0])]
     for index, (pair_id, pair) in enumerate(pairs.items(), 1):
         print(f"Patch {index}/{len(pairs)}: {pair_id}", flush=True)
+        pair_started = time.perf_counter()
         try:
             mapping = mappings[pair_id]
             roots = {condition: activation_root(root, pair_id, condition) for condition in pair}
@@ -529,7 +545,12 @@ def run_patch_stage(args, model, processor, pairs, mappings, root, fingerprint):
                     pair_id, direction, pair, mapping, root, model, processor,
                     prepared[target], fingerprint, args.continue_on_error,
                 )
-                print(f"  {direction}: {count} completed patches", flush=True)
+                print(
+                    f"  {direction}: {count} completed patches after "
+                    f"{(time.perf_counter() - pair_started) / 60:.1f} min | "
+                    f"{Path(root) / 'patches' / pair_id / (direction + '.jsonl')}",
+                    flush=True,
+                )
                 unresolved_path = Path(root) / "patches" / pair_id / f"{direction}.errors.json"
                 unresolved = json.loads(unresolved_path.read_text(encoding="utf-8"))
                 if unresolved and args.require_complete:

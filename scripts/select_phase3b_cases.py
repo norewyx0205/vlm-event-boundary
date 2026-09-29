@@ -98,6 +98,10 @@ def main():
     parser.add_argument("--control_count", type=int, default=10)
     parser.add_argument("--mirrored_count", type=int, default=5)
     parser.add_argument("--allow_incomplete", action="store_true")
+    parser.add_argument(
+        "--selection_purpose", choices=("formal_primary", "technical_preflight"),
+        default="formal_primary",
+    )
     args = parser.parse_args()
     screened, rescue, annotations, results = screen(args.annotation_paths, args.result_paths)
     mappings = {
@@ -124,6 +128,8 @@ def main():
     mirrored_controls = []
     independent_mirrored_rescues = []
     for primary_case in primary:
+        if len(mirrored_controls) + len(independent_mirrored_rescues) >= args.mirrored_count:
+            break
         opposite = "swapped" if primary_case["prompt_variant"] == "original" else "original"
         key = (primary_case["base_sample_id"], opposite)
         if key in screened_lookup and mappings.get(key, {}).get("eligible"):
@@ -133,8 +139,6 @@ def main():
                 else mirrored_controls
             )
             destination.append(counterpart)
-        if len(mirrored_controls) + len(independent_mirrored_rescues) >= args.mirrored_count:
-            break
     output_dir = Path(args.output_dir)
     for name, cases, stratum in (
         ("case_manifest.jsonl", primary, "primary_rescue"),
@@ -185,6 +189,8 @@ def main():
     )
     summary = {
         "schema": "phase3b_case_selection_v1",
+        "selection_purpose": args.selection_purpose,
+        "requested_primary_count": args.primary_count,
         "representative_selection_method": "median_base_id_within_first_mover_stratum_before_patching",
         "representative_pair_ids": frozen_representatives(primary),
         "primary_bases": [row["base_sample_id"] for row in primary],
