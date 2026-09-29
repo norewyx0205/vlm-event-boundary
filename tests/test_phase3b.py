@@ -7,11 +7,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 import numpy as np
 
-from scripts import analyze_phase3b, phase3b_core, screen_phase3b_rescues, run_phase3b_screening
+from scripts import analyze_phase3b, audit_phase3b_mappings, phase3b_core, screen_phase3b_rescues, run_phase3b_screening
 from scripts.run_phase3b_relocation_control import decoded_video_psnr, relocation_pairs
 from scripts.select_phase3b_cases import choose_independent_cases, frozen_representatives
 from scripts.run_phase3b_patching import patch_forward, validate_behavioral_category
@@ -49,6 +50,41 @@ def annotation(base, condition, variant):
 
 
 class Phase3BTest(unittest.TestCase):
+    def test_mapping_audit_persists_cached_controls_after_new_rescues(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            prior_control = {
+                "pair_id": "phase3b_base_002_original", "base_sample_id": 2,
+                "prompt_variant": "original", "eligible": True,
+            }
+            (output / "video_mapping_manifest.jsonl").write_text(json.dumps(prior_control) + "\n")
+            rescue = {
+                "base_sample_id": 1, "prompt_variant": "original", "outcome": "temporal_rescue",
+                "low_eval_id": "low_1", "temporal_eval_id": "temporal_1",
+            }
+            stable = {
+                "base_sample_id": 2, "prompt_variant": "original", "outcome": "stable_both_correct",
+            }
+            new_mapping = {
+                "pair_id": "phase3b_base_001_original", "base_sample_id": 1,
+                "prompt_variant": "original", "eligible": True,
+            }
+            with patch.object(sys, "argv", [
+                "audit_phase3b_mappings.py", "--annotation_paths", "unused_annotations",
+                "--result_paths", "unused_results", "--output_dir", str(output),
+            ]), patch.object(audit_phase3b_mappings, "screen", return_value=(
+                [rescue, stable], [rescue], {"low_1": {}, "temporal_1": {}}, {},
+            )), patch.object(audit_phase3b_mappings, "version", return_value="0.0.14"), patch.object(
+                audit_phase3b_mappings.AutoProcessor, "from_pretrained", return_value=object(),
+            ), patch.object(audit_phase3b_mappings, "audit_pair", return_value=new_mapping):
+                audit_phase3b_mappings.main()
+            rows = [json.loads(line) for line in (output / "video_mapping_manifest.jsonl").read_text().splitlines()]
+            self.assertEqual([row["pair_id"] for row in rows], [
+                "phase3b_base_001_original", "phase3b_base_002_original",
+            ])
+            summary = json.loads((output / "video_mapping_coverage_summary.json").read_text())
+            self.assertEqual(summary["eligible_prompt_pairs"], len(rows))
+
     def test_screening_status_checkpoint_and_heartbeat(self):
         with tempfile.TemporaryDirectory() as directory:
             reporter = run_phase3b_screening.ScreeningProgress(

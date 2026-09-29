@@ -1157,6 +1157,11 @@ GitHub so a fresh Colab clone can restore it; otherwise set
    Before reusing a Drive pool, screening checks the saved generation settings
    and generator-code hashes. A changed generator or missing config requires a
    new pool directory rather than silently mixing stimuli.
+   After the 50-case screen, a CPU-only repeat of `screen` can repair a truncated
+   cached mapping manifest without repeating model inference. The repaired
+   selection is frozen under `selection_v2_controls`; the original `selection`
+   directory remains untouched. The notebook checks that primary and preflight
+   rescue manifests match the original selection before proceeding.
 2. `preflight`: two first-mover-balanced cases, technical controls, patching,
    analysis, and a temporal-relocation control. If screening exhausted its
    budget below 50 eligible rescues, this stage freezes a separate

@@ -150,6 +150,8 @@ def main():
         outputs.append(record)
         atomic_write_jsonl(output_path, outputs)
         print(f"Mapping {len(outputs)}/{len(audit_items)} {pair_id}: eligible={record['eligible']}", flush=True)
+    # Cached records can come after the last new record; persist the complete ordered audit.
+    atomic_write_jsonl(output_path, outputs)
     config = {
         **static_config,
         "candidate_count": len(candidates), "eligible_prompt_pairs": sum(row["eligible"] for row in outputs),
