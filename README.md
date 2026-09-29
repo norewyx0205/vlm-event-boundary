@@ -1097,6 +1097,9 @@ prompt pairs, and up to 10 stable-both-correct controls by default. Opposite pro
 independently rescue are labelled separately from mirrored controls; each pair
 retains its own behavioral classification. A separate two-case preflight chooses
 one `target_1`-first and one `target_2`-first primary case.
+The selection summary also freezes one representative pair per first-mover
+stratum (median base ID, chosen before activation patching); full-run plots use
+these IDs rather than selecting cases from patch effects or observed margins.
 
 Six visual groups represent literal target/distractor identity by Event 1/2.
 The four first-/second-mover roles are derived per case from `first_object_id`,
@@ -1117,7 +1120,14 @@ groups use explicit `event_relative_replace`; query, options, and decision use
 run. The primary outcome is the correct-minus-incorrect first-token A/B logit
 margin, with categorical flips secondary. Same-state identity patches are
 technical no-op controls; a separate preflight global temporal-relocation
-control tests cross-position effects. These are decoder residual-stream
+control tests cross-position effects. Its shift is derived separately for each
+matched pair from the low-to-temporal Event 2 onset displacement (normally 45
+source frames), not a fixed one-second offset. This control moves the entire
+low-boundary video in absolute time and focuses its patch summary on Event 2
+visual groups; it does not isolate an Event 2-only video edit. The original
+low video and its codec-matched re-encode are checked for prediction parity,
+margin change, and decoded-frame PSNR before interpreting relocation effects.
+These are decoder residual-stream
 interventions at visual-token positions, **not** vision-encoder patches.
 CPU analysis writes all-layer divergence and fixed-grid causal heatmaps, plus
 representative Target-1-first and Target-2-first activation-norm trajectories.
@@ -1131,7 +1141,10 @@ to `/content` (or edit `ARTIFACT_ARCHIVES` to its exact uploaded path) before
 screening. Advance `PHASE3B_STAGE` explicitly:
 
 1. `screen`: batched generation/evaluation, processor mapping audit, and frozen
-   selection. Re-running resumes completed batches.
+selection. Re-running resumes completed batches.
+   Before reusing a Drive pool, screening checks the saved generation settings
+   and generator-code hashes. A changed generator or missing config requires a
+   new pool directory rather than silently mixing stimuli.
 2. `preflight`: two first-mover-balanced cases, technical controls, patching,
    analysis, and a temporal-relocation control.
 3. `full`: five-case independent shards for the frozen primary and secondary

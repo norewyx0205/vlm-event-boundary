@@ -9,9 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import numpy as np
 
-from scripts import analyze_phase3b, phase3b_core, screen_phase3b_rescues
-from scripts.select_phase3b_cases import choose_independent_cases
+from scripts import analyze_phase3b, phase3b_core, screen_phase3b_rescues, run_phase3b_screening
+from scripts.run_phase3b_relocation_control import decoded_video_psnr, relocation_pairs
+from scripts.select_phase3b_cases import choose_independent_cases, frozen_representatives
 from scripts.run_phase3b_patching import patch_forward, validate_behavioral_category
 from scripts.select_phase3b_cases import write_frozen_rows
 
@@ -47,6 +49,81 @@ def annotation(base, condition, variant):
 
 
 class Phase3BTest(unittest.TestCase):
+    def test_relocation_uses_matched_event_two_displacement(self):
+        low = annotation(1, "low_boundary", "original")
+        temporal = annotation(1, "temporal_boundary", "original")
+        for row in (low, temporal):
+            row["phase3b_pair_id"] = "pair_1"
+        low["event_timing"] = {
+            "first_event_start_frame": 30, "first_event_end_frame": 60,
+            "second_event_start_frame": 60, "second_event_end_frame": 90,
+        }
+        temporal["event_timing"] = {
+            "first_event_start_frame": 30, "first_event_end_frame": 60,
+            "second_event_start_frame": 105, "second_event_end_frame": 135,
+        }
+        self.assertEqual(relocation_pairs([low, temporal], 2)[0][1], 45)
+        with self.assertRaisesRegex(ValueError, "differs from matched"):
+            relocation_pairs([low, temporal], 2, requested_shift=15)
+        with self.assertRaisesRegex(ValueError, "both boundary rows"):
+            relocation_pairs([low], 2)
+
+    def test_reencode_psnr_checks_frame_count_and_image_shape(self):
+        original = np.zeros((4, 4, 3), dtype=np.uint8)
+        reencoded = original.copy()
+        reencoded[0, 0] = 10
+        self.assertGreater(decoded_video_psnr([original], [reencoded]), 30)
+        self.assertIsNone(decoded_video_psnr([original], [original]))
+        with self.assertRaisesRegex(RuntimeError, "frame count"):
+            decoded_video_psnr([original], [])
+
+    def test_old_pool_provenance_is_checked_before_reuse(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_phase3b_screening.validate_pool_provenance(root, 42, 300)
+            (root / "L5_full").mkdir()
+            (root / "L5_full/annotations.jsonl").write_text("\n")
+            with self.assertRaisesRegex(RuntimeError, "lacks its generation config"):
+                run_phase3b_screening.validate_pool_provenance(root, 42, 300)
+            (root / "phase3b_generation_config.json").write_text(json.dumps({
+                "schema": "phase3b_rescue_pool_v1", "generator_code_sha256": {},
+                "seed": 42, "max_new_bases": 300,
+                "conditions": ["low_boundary", "temporal_boundary"],
+            }))
+            with self.assertRaisesRegex(RuntimeError, "generator_code_sha256"):
+                run_phase3b_screening.validate_pool_provenance(root, 42, 300)
+
+    def test_representatives_are_frozen_without_patch_outputs(self):
+        selected = [
+            {"base_sample_id": base, "first_object_id": mover, "prompt_variant": "original"}
+            for mover in (1, 2) for base in (mover, mover + 2, mover + 4)
+        ]
+        self.assertEqual(frozen_representatives(selected), {
+            "target_1_first": "phase3b_base_003_original",
+            "target_2_first": "phase3b_base_004_original",
+        })
+
+    def test_analysis_uses_frozen_representative_pair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "analysis_case_manifest.jsonl"
+            manifest.write_text("\n")
+            (root / "case_selection_summary.json").write_text(json.dumps({
+                "representative_pair_ids": {"target_1_first": "pair_2"}
+            }))
+            captures = {
+                (pair, condition): {"analysis_stratum": "primary_rescue", "first_object_id": 1}
+                for pair in ("pair_1", "pair_2")
+                for condition in ("low_boundary", "temporal_boundary")
+            }
+            self.assertEqual(
+                analyze_phase3b.representative_pairs(captures, manifest),
+                {"target_1_first": "pair_2"},
+            )
+            (root / "case_selection_summary.json").unlink()
+            with self.assertRaisesRegex(ValueError, "selection summary is missing"):
+                analyze_phase3b.representative_pairs(captures, manifest)
+
     def test_section_scoped_text_groups_keep_query_and_options_separate(self):
         row = annotation(1, "low_boundary", "original")
         tokenizer = CharacterTokenizer()
@@ -202,6 +279,8 @@ class Phase3BTest(unittest.TestCase):
                 "--mirrored_count", "2",
             ], check=True, capture_output=True, text=True)
             analysis = [json.loads(line) for line in (root / "selection/analysis_case_manifest.jsonl").read_text().splitlines()]
+            summary = json.loads((root / "selection/case_selection_summary.json").read_text())
+            self.assertEqual(len(summary["representative_pair_ids"]), 1)
             low = [row for row in analysis if row["condition"] == "low_boundary"]
             self.assertEqual(len(low), 4)
             self.assertEqual(sum(row["phase3b_analysis_stratum"] == "primary_rescue" for row in low), 2)

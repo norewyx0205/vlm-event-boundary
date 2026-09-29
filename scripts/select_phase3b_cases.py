@@ -72,6 +72,21 @@ def write_frozen_rows(path, rows):
         atomic_write_jsonl(path, rows)
 
 
+def frozen_representatives(primary):
+    representatives = {}
+    for mover in (1, 2):
+        cases = sorted(
+            (row for row in primary if int(row["first_object_id"]) == mover),
+            key=lambda row: (int(row["base_sample_id"]), row["prompt_variant"]),
+        )
+        if cases:
+            chosen = cases[(len(cases) - 1) // 2]
+            representatives[f"target_{mover}_first"] = (
+                f"phase3b_base_{chosen['base_sample_id']:03d}_{chosen['prompt_variant']}"
+            )
+    return representatives
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--annotation_paths", nargs="+", required=True)
@@ -170,6 +185,8 @@ def main():
     )
     summary = {
         "schema": "phase3b_case_selection_v1",
+        "representative_selection_method": "median_base_id_within_first_mover_stratum_before_patching",
+        "representative_pair_ids": frozen_representatives(primary),
         "primary_bases": [row["base_sample_id"] for row in primary],
         "reserve_bases": [row["base_sample_id"] for row in reserves],
         "control_bases": [row["base_sample_id"] for row in controls],

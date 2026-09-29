@@ -1,6 +1,7 @@
 """Resume batched Phase 3B screening until 60 eligible bases or the fixed cap."""
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -25,6 +26,35 @@ def result_path(result_root, model_name, start, end):
     directory = Path(result_root) / slugify(model_name) / slugify(dataset)
     candidates = sorted(directory.glob("*/raw_results.jsonl"))
     return candidates[-1] if candidates else None
+
+
+def validate_pool_provenance(pool_root, seed, max_new_bases):
+    pool_root = Path(pool_root)
+    config_path = pool_root / "phase3b_generation_config.json"
+    has_pool = (pool_root / "L5_full" / "annotations.jsonl").exists() or any(
+        (pool_root / "batches").glob("batch_???_???"))
+    if not config_path.exists():
+        if has_pool:
+            raise RuntimeError("Existing Phase 3B pool lacks its generation config; cannot reuse it.")
+        return
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    expected_hashes = {
+        name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
+        for name in ("generate_phase3b_rescue_pool.py", "generate_ladder_dataset.py")
+    }
+    expected = {
+        "schema": "phase3b_rescue_pool_v1",
+        "generator_code_sha256": expected_hashes,
+        "seed": seed,
+        "max_new_bases": max_new_bases,
+        "conditions": ["low_boundary", "temporal_boundary"],
+    }
+    mismatches = [key for key, value in expected.items() if config.get(key) != value]
+    if mismatches:
+        raise RuntimeError(
+            f"Existing Phase 3B pool provenance differs on {mismatches}; "
+            "use the original code/config or a new pool directory."
+        )
 
 
 def completed_result(path, annotation_path):
@@ -195,6 +225,7 @@ def main():
     pool_root = Path(args.pool_root)
     output_root = Path(args.output_root)
     validate_signatures(args, [args.existing_result_path])
+    validate_pool_provenance(pool_root, args.seed, args.max_new_bases)
     if not args.only_existing:
         for batch in sorted((pool_root / "batches").glob("batch_???_???")):
             if not (batch / "annotations.jsonl").is_file():

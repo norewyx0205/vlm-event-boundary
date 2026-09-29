@@ -177,7 +177,7 @@ def aggregate_divergence(rows):
     return result
 
 
-def representative_pairs(captures):
+def representative_pairs(captures, manifest_path):
     by_mover = defaultdict(list)
     for pair_id, condition in captures:
         if condition != "low_boundary" or (pair_id, "temporal_boundary") not in captures:
@@ -185,16 +185,23 @@ def representative_pairs(captures):
         low = captures[(pair_id, "low_boundary")]
         if low.get("analysis_stratum") != "primary_rescue":
             continue
-        temporal = captures[(pair_id, "temporal_boundary")]
-        delta = temporal["decision"]["margin"] - low["decision"]["margin"]
-        by_mover[int(low["first_object_id"])].append((pair_id, delta))
-    chosen = {}
-    for mover in (1, 2):
-        items = by_mover[mover]
-        if items:
-            median = float(np.median([item[1] for item in items]))
-            chosen[f"target_{mover}_first"] = min(items, key=lambda item: (abs(item[1] - median), item[0]))[0]
-    return chosen
+        by_mover[int(low["first_object_id"])].append(pair_id)
+    summary_path = Path(manifest_path).parent / "case_selection_summary.json"
+    if summary_path.is_file():
+        frozen = json.loads(summary_path.read_text(encoding="utf-8")).get("representative_pair_ids", {})
+        if Path(manifest_path).name != "preflight_case_manifest.jsonl":
+            if not frozen:
+                raise ValueError(f"Frozen representative case IDs are missing from {summary_path}.")
+            missing = {label: pair for label, pair in frozen.items() if (pair, "low_boundary") not in captures}
+            if missing:
+                raise ValueError(f"Frozen representative cases absent from complete analysis: {missing}.")
+            return frozen
+    elif Path(manifest_path).name in {"case_manifest.jsonl", "analysis_case_manifest.jsonl"}:
+        raise ValueError(f"Frozen representative selection summary is missing: {summary_path}.")
+    return {
+        f"target_{mover}_first": sorted(by_mover[mover])[0]
+        for mover in (1, 2) if by_mover[mover]
+    }
 
 
 def case_correlations(divergence, patches):
@@ -241,7 +248,7 @@ def plot_heatmap(rows, groups, layers, metric, title, path, centered=False):
     plt.close(fig)
 
 
-def write_plots(output, divergence, patches, divergence_table, patch_table, captures):
+def write_plots(output, divergence, patches, divergence_table, patch_table, captures, representatives):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -299,7 +306,6 @@ def write_plots(output, divergence, patches, divergence_table, patch_table, capt
            title="Divergence versus patch effect | exploratory locations")
     fig.savefig(plot_dir / "divergence_vs_patch_effect.png", dpi=160)
     plt.close(fig)
-    representatives = representative_pairs(captures)
     for label, pair_id in representatives.items():
         case = [row for row in divergence if row["phase3b_pair_id"] == pair_id]
         table = aggregate_divergence(case)
@@ -386,9 +392,9 @@ def main():
     write_csv(output / "patch_by_layer_group_direction.csv", patch_table)
     correlations = case_correlations(divergence, patches)
     write_csv(output / "divergence_patch_correlations_by_case.csv", correlations)
-    representatives = {} if args.no_plots else write_plots(
-        output, divergence, patches, divergence_table, patch_table, captures
-    )
+    representatives = representative_pairs(captures, args.manifest_path)
+    if not args.no_plots:
+        write_plots(output, divergence, patches, divergence_table, patch_table, captures, representatives)
     valid_correlations = [row["spearman_cosine_vs_effect"] for row in correlations if row["spearman_cosine_vs_effect"] is not None]
     summary = {
         "schema": SCHEMA,
