@@ -1169,6 +1169,11 @@ GitHub so a fresh Colab clone can restore it; otherwise set
    Its checkpoints and analyses use `technical_*` directories; it does not
    create or substitute for the formal primary cohort. Running this stage
    does not re-run screening.
+   The formal `selection_v2_controls` preflight uses separate
+   `preflight_v2_controls` checkpoints, `preflight_v2_controls_analysis`, and
+   `relocation_control_v2_controls` outputs so earlier preflight artifacts are
+   never reused under a changed selection fingerprint. Capture/patch child logs
+   are streamed to the notebook and retained under the checkpoint `logs/` folder.
 3. `full`: five-case independent shards for the frozen primary and secondary
    analysis cohorts, followed by CPU analysis. Requires 50 formally frozen
    independent primary rescues and a preflight from that formal selection;
