@@ -429,6 +429,56 @@ class ActivationPatchingTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "processor inputs differ"):
             core.validate_archived_input_metadata(prepared)
 
+    def test_archived_processor_metadata_records_device_only_difference(self):
+        archived = {
+            "input_ids": {"shape": [1, 4811], "dtype": "torch.int64", "device": "cuda:0"},
+            "pixel_values_videos": {
+                "shape": [18432, 1536], "dtype": "torch.float32", "device": "cuda:0",
+            },
+        }
+        current = {key: dict(value, device="cpu") for key, value in archived.items()}
+        prepared = {"row": {"archived_input_metadata": archived}, "input_metadata": current}
+        result = core.validate_archived_input_metadata(prepared)
+        self.assertTrue(result["matches"])
+        self.assertEqual(result["comparison_policy"], "processor_metadata_excluding_tensor_device")
+        self.assertEqual(result["tensor_device_differences"], {
+            key: {"archived": "cuda:0", "current": "cpu"} for key in archived
+        })
+        self.assertEqual(result["mismatches"], {})
+        self.assertTrue(all(value["device"] == "cuda:0" for value in archived.values()))
+        self.assertTrue(all(value["device"] == "cpu" for value in current.values()))
+
+    def test_device_tolerant_metadata_still_rejects_real_input_differences(self):
+        metadata = {
+            "video_grid_thw": [[18, 32, 32]],
+            "visual_token_count_from_grid_thw": 4608,
+            "video_token_count_from_mm_token_type_ids": 4608,
+            "video_inputs": [{"shape": [36, 3, 504, 504]}],
+            "input_ids": {"shape": [1, 4811], "dtype": "torch.int64", "device": "cuda:0"},
+            "pixel_values_videos": {
+                "shape": [18432, 1536], "dtype": "torch.float32", "device": "cuda:0",
+            },
+        }
+        cases = [
+            ("input_ids", {"shape": [1, 4812], "dtype": "torch.int64", "device": "cpu"}),
+            ("input_ids", {"shape": [1, 4811], "dtype": "torch.int32", "device": "cpu"}),
+            ("pixel_values_videos", {"shape": [18432, 1536], "dtype": "torch.float16", "device": "cpu"}),
+            ("pixel_values_videos", {"shape": [18000, 1536], "dtype": "torch.float32", "device": "cpu"}),
+            ("video_inputs", [{"shape": [34, 3, 504, 504]}]),
+            ("video_grid_thw", [[17, 32, 32]]),
+            ("visual_token_count_from_grid_thw", 4352),
+            ("video_token_count_from_mm_token_type_ids", 4352),
+        ]
+        for key, changed in cases:
+            with self.subTest(key=key, changed=changed):
+                current = dict(metadata)
+                for field in ("input_ids", "pixel_values_videos"):
+                    current[field] = dict(metadata[field], device="cpu")
+                current[key] = changed
+                prepared = {"row": {"archived_input_metadata": metadata}, "input_metadata": current}
+                with self.assertRaisesRegex(RuntimeError, key + r".*Metadata differences"):
+                    core.validate_archived_input_metadata(prepared)
+
     def test_spearman_uses_tied_ranks(self):
         self.assertAlmostEqual(analysis.spearman([1, 2, 3], [2, 4, 6]), 1.0)
         self.assertAlmostEqual(analysis.spearman([1, 2, 3], [6, 4, 2]), -1.0)

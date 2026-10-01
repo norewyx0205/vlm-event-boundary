@@ -1194,6 +1194,17 @@ Reuse the same
 repository commit, model revision, manifests, and mapping file when resuming a
 shard; the fingerprint also includes key source-file hashes, so uncommitted
 code changes cannot silently reuse old captures. A mismatch is rejected.
+The capture stage may restart an incompatible setup-only shard containing just
+`run_config.json` and, optionally, `capture_errors.json`; it first moves the
+entire failed shard into `incompatible_failed_shards/` and records that path in
+the new configuration. Any activation, result, or unrecognized file retains
+strict fingerprint protection and requires a separate output directory.
+Archived processor parity compares tensor shape/dtype, sampled-frame tensor
+dimensions, video grid, and token counts, not the CPU/CUDA device label. Device differences are
+reported separately in `index.json` under
+`archived_input_parity.tensor_device_differences`. Metadata mismatches fail
+before activation capture, while prediction and generation parity remain
+mandatory after inference.
 At the amended 500-new-base screening cap, the new pool has at most 2,000 prompt
 evaluations. The fixed grid has 218 bidirectional patches per matched pair:
 10,900 for 50 primary rescues, plus up to 3,270 for the default 15 secondary

@@ -93,6 +93,47 @@ def capture_complete(root, fingerprint, layer_count=36):
     )
 
 
+def prepare_shard_run_config(root, fingerprint, payload, *, allow_failed_recovery):
+    """Preserve incompatible failed setup; never replace captured research data."""
+    root = Path(root)
+    config_path = root / "run_config.json"
+    quarantined = None
+    if config_path.is_file():
+        prior = json.loads(config_path.read_text(encoding="utf-8"))
+        if prior.get("run_fingerprint") == fingerprint:
+            return prior
+        files = {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*") if path.is_file() or path.is_symlink()
+        }
+        if not allow_failed_recovery or not files <= {"run_config.json", "capture_errors.json"}:
+            raise RuntimeError(
+                "Existing shard has a different model/code/data fingerprint. "
+                "Saved or unrecognized artifacts will not be overwritten; preserve this "
+                "checkpoint and use a separate --output_dir for the changed run. "
+                f"Checkpoint: {root}."
+            )
+        quarantine_root = root.parent / "incompatible_failed_shards"
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+        quarantined = quarantine_root / f"{root.name}_{time.time_ns()}"
+        root.rename(quarantined)
+        print(
+            f"Preserved incompatible setup-only shard at {quarantined}; "
+            "no activation or result files were present. Restarting capture setup.",
+            flush=True,
+        )
+    elif root.exists() and any(root.iterdir()):
+        raise RuntimeError(
+            f"Non-empty shard has no run_config.json: {root}. "
+            "Preserve it and use a separate --output_dir."
+        )
+    config = {**payload, "run_fingerprint": fingerprint}
+    if quarantined is not None:
+        config["quarantined_failed_checkpoint"] = str(quarantined)
+    atomic_write_json(config_path, config)
+    return config
+
+
 def _capture_all_layers(model, processor, prepared, root, fingerprint, verify_standard=True):
     layers, layer_path = locate_decoder_layers(model)
     if len(layers) != 36:
@@ -102,6 +143,7 @@ def _capture_all_layers(model, processor, prepared, root, fingerprint, verify_st
     if not union or any(not groups[name] for name in GROUPS):
         missing = [name for name in GROUPS if not groups[name]]
         raise RuntimeError(f"Empty planned Phase 3B token groups: {missing}.")
+    archived_metadata = validate_archived_input_metadata(prepared)
     index_lookup = {position: i for i, position in enumerate(union)}
     snapshots = {}
     def capture_hook(layer):
@@ -123,7 +165,6 @@ def _capture_all_layers(model, processor, prepared, root, fingerprint, verify_st
     logits = output.logits[0, -1, :].float().detach().cpu()
     decision = decision_from_logits(logits, processor, prepared["row"]["correct_option"])
     validate_archived_prediction(prepared, decision)
-    archived_metadata = validate_archived_input_metadata(prepared)
     standard = None
     if verify_standard:
         standard_id, standard_logits = standard_first_token(model, prepared["inputs"])
@@ -632,13 +673,10 @@ def main():
         "pair_ids": list(pairs),
     }
     fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True).encode()).hexdigest()
-    config_path = root / "run_config.json"
-    if config_path.exists():
-        prior = json.loads(config_path.read_text(encoding="utf-8"))
-        if prior["run_fingerprint"] != fingerprint:
-            raise RuntimeError("Existing shard has a different model/code/data fingerprint.")
-    else:
-        atomic_write_json(config_path, {"run_fingerprint": fingerprint, **fingerprint_payload})
+    prepare_shard_run_config(
+        root, fingerprint, fingerprint_payload,
+        allow_failed_recovery=args.stage == "capture",
+    )
     print(f"Phase 3B {args.stage} shard {args.shard_index}: {len(pairs)} pairs", flush=True)
     started = time.perf_counter()
     model, processor = load_model(

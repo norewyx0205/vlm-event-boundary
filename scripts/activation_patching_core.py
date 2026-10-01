@@ -793,20 +793,33 @@ def validate_archived_input_metadata(prepared):
         "pixel_values_videos",
         "input_ids",
     )
-    mismatches = {
-        key: {"archived": archived.get(key), "current": current.get(key)}
-        for key in checked
-        if archived.get(key) != current.get(key)
-    }
+    mismatches = {}
+    device_differences = {}
+    tensor_fields = {"pixel_values_videos", "input_ids"}
+    for key in checked:
+        archived_value, current_value = archived.get(key), current.get(key)
+        if key in tensor_fields and isinstance(archived_value, dict) and isinstance(current_value, dict):
+            if archived_value.get("device") != current_value.get("device"):
+                device_differences[key] = {
+                    "archived": archived_value.get("device"), "current": current_value.get("device"),
+                }
+            # CPU preparation and CUDA inference describe the same processor tensors.
+            archived_value = {name: value for name, value in archived_value.items() if name != "device"}
+            current_value = {name: value for name, value in current_value.items() if name != "device"}
+        if archived_value != current_value:
+            mismatches[key] = {"archived": archived.get(key), "current": current.get(key)}
     result = {
         "available": True,
         "matches": not mismatches,
         "checked_fields": list(checked),
         "mismatches": mismatches,
+        "tensor_device_differences": device_differences,
+        "comparison_policy": "processor_metadata_excluding_tensor_device",
     }
     if mismatches:
         raise RuntimeError(
             "Phase 3 processor inputs differ from the archived behavioural run: "
             + ", ".join(sorted(mismatches))
+            + ". Metadata differences: " + json.dumps(mismatches, sort_keys=True)
         )
     return result

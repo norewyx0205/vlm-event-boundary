@@ -15,7 +15,9 @@ import numpy as np
 from scripts import analyze_phase3b, audit_phase3b_mappings, phase3b_core, screen_phase3b_rescues, run_phase3b_screening
 from scripts.run_phase3b_relocation_control import decoded_video_psnr, relocation_pairs
 from scripts.select_phase3b_cases import choose_independent_cases, frozen_representatives
-from scripts.run_phase3b_patching import patch_forward, validate_behavioral_category
+from scripts.run_phase3b_patching import (
+    _capture_all_layers, patch_forward, prepare_shard_run_config, validate_behavioral_category,
+)
 from scripts.select_phase3b_cases import write_frozen_rows
 
 
@@ -50,6 +52,77 @@ def annotation(base, condition, variant):
 
 
 class Phase3BTest(unittest.TestCase):
+    def test_shard_config_preserves_same_fingerprint_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shard_00"
+            first = prepare_shard_run_config(root, "same", {"pair_ids": ["pair_1"]}, allow_failed_recovery=True)
+            (root / "layer_00.pt").write_bytes(b"saved activation")
+            config_bytes = (root / "run_config.json").read_bytes()
+            resumed = prepare_shard_run_config(root, "same", {}, allow_failed_recovery=True)
+            self.assertEqual(first, resumed)
+            self.assertEqual((root / "run_config.json").read_bytes(), config_bytes)
+            self.assertEqual((root / "layer_00.pt").read_bytes(), b"saved activation")
+            self.assertFalse((root.parent / "incompatible_failed_shards").exists())
+
+    def test_shard_config_quarantines_incompatible_setup_only_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shard_00"
+            prepare_shard_run_config(root, "old", {"pair_ids": ["pair_1"]}, allow_failed_recovery=True)
+            (root / "capture_errors.json").write_text('[{"error": "metadata mismatch"}]')
+            config_bytes = (root / "run_config.json").read_bytes()
+            error_bytes = (root / "capture_errors.json").read_bytes()
+            updated = prepare_shard_run_config(root, "new", {"pair_ids": ["pair_1"]}, allow_failed_recovery=True)
+            preserved = Path(updated["quarantined_failed_checkpoint"])
+            self.assertEqual((preserved / "run_config.json").read_bytes(), config_bytes)
+            self.assertEqual((preserved / "capture_errors.json").read_bytes(), error_bytes)
+            self.assertEqual(updated["run_fingerprint"], "new")
+            self.assertFalse((root / "capture_errors.json").exists())
+            self.assertEqual(list(root.parent.glob("shard_*")), [root])
+
+    def test_shard_config_rejects_changed_fingerprint_with_research_outputs(self):
+        for filename in ("activations/pair_1/layer_00.pt", "divergence/pair_1.jsonl", "unexpected.txt"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "shard_00"
+                prepare_shard_run_config(root, "old", {}, allow_failed_recovery=True)
+                path = root / filename
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"keep")
+                with self.assertRaisesRegex(RuntimeError, "different model/code/data fingerprint"):
+                    prepare_shard_run_config(root, "new", {}, allow_failed_recovery=True)
+                self.assertEqual(path.read_bytes(), b"keep")
+                self.assertEqual(json.loads((root / "run_config.json").read_text())["run_fingerprint"], "old")
+                self.assertFalse((root.parent / "incompatible_failed_shards").exists())
+
+    def test_patch_stage_cannot_reset_incompatible_setup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shard_00"
+            prepare_shard_run_config(root, "old", {}, allow_failed_recovery=True)
+            with self.assertRaisesRegex(RuntimeError, "different model/code/data fingerprint"):
+                prepare_shard_run_config(root, "new", {}, allow_failed_recovery=False)
+            self.assertEqual(json.loads((root / "run_config.json").read_text())["run_fingerprint"], "old")
+
+    def test_missing_config_cannot_adopt_existing_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "shard_00"
+            root.mkdir()
+            (root / "layer_00.pt").write_bytes(b"keep")
+            with self.assertRaisesRegex(RuntimeError, "Non-empty shard has no run_config"):
+                prepare_shard_run_config(root, "new", {}, allow_failed_recovery=True)
+            self.assertFalse((root / "run_config.json").exists())
+
+    def test_capture_metadata_mismatch_fails_before_model_forward(self):
+        prepared = {
+            "groups": {name: [0] for name in phase3b_core.GROUPS},
+            "row": {"archived_input_metadata": {"input_ids": {"shape": [1, 10]}}},
+            "input_metadata": {"input_ids": {"shape": [1, 11]}},
+        }
+        with patch("scripts.run_phase3b_patching.locate_decoder_layers", return_value=(
+            [object()] * 36, "fake.layers",
+        )), patch("scripts.run_phase3b_patching.model_forward") as forward:
+            with self.assertRaisesRegex(RuntimeError, "processor inputs differ"):
+                _capture_all_layers(object(), object(), prepared, "unused", "fingerprint")
+            forward.assert_not_called()
+
     def test_mapping_audit_persists_cached_controls_after_new_rescues(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
