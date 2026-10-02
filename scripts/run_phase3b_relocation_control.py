@@ -21,11 +21,13 @@ try:
         validate_archived_input_metadata, validate_archived_prediction,
     )
     from .common import PROJECT_ROOT, read_jsonl
+    from .phase3b_paths import load_path_map, resolve_video_path
     from .phase3b_core import VIDEO_GROUPS, build_pair_mappings, prepare_example
     from .run_eval import configure_reproducibility, load_model
     from .run_phase3b_patching import (
         _capture_all_layers, activation_root, load_capture, no_patch_forward, patch_forward,
         repo_commit, validate_patch_controls,
+        gpu_hardware_metadata, validate_single_gpu_model,
     )
 except ImportError:
     from activation_patching_core import (
@@ -33,11 +35,13 @@ except ImportError:
         validate_archived_input_metadata, validate_archived_prediction,
     )
     from common import PROJECT_ROOT, read_jsonl
+    from phase3b_paths import load_path_map, resolve_video_path
     from phase3b_core import VIDEO_GROUPS, build_pair_mappings, prepare_example
     from run_eval import configure_reproducibility, load_model
     from run_phase3b_patching import (
         _capture_all_layers, activation_root, load_capture, no_patch_forward, patch_forward,
         repo_commit, validate_patch_controls,
+        gpu_hardware_metadata, validate_single_gpu_model,
     )
 
 
@@ -138,6 +142,11 @@ def main():
     parser.add_argument("--manifest_path", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--project_root", default=str(PROJECT_ROOT))
+    parser.add_argument("--path_map_path", default=None)
+    parser.add_argument("--single_gpu", action="store_true")
+    parser.add_argument("--expected_transformers_version", default=None)
+    parser.add_argument("--expected_torch_version", default=None)
+    parser.add_argument("--expected_qwen_vl_utils_version", default=None)
     parser.add_argument("--model_name", default="Qwen/Qwen3-VL-8B-Instruct")
     parser.add_argument("--model_revision", default="0c351dd01ed87e9c1b53cbc748cba10e6187ff3b")
     parser.add_argument("--max_cases", type=int, default=2)
@@ -151,6 +160,17 @@ def main():
     parser.add_argument("--layers", default="0,16,32")
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    args.path_map = load_path_map(args.path_map_path)
+    if args.single_gpu:
+        validate_single_gpu_model()
+    if args.expected_transformers_version and transformers.__version__ != args.expected_transformers_version:
+        parser.error(f"Expected transformers {args.expected_transformers_version}, got {transformers.__version__}.")
+    if args.expected_torch_version and torch.__version__.split("+")[0] != args.expected_torch_version:
+        parser.error(f"Expected torch {args.expected_torch_version}, got {torch.__version__}.")
+    if args.expected_qwen_vl_utils_version and version("qwen-vl-utils") != args.expected_qwen_vl_utils_version:
+        parser.error(f"Expected qwen-vl-utils {args.expected_qwen_vl_utils_version}, got {version('qwen-vl-utils')}.")
+    if args.video_fps is not None and args.video_num_frames is not None:
+        parser.error("Use only one temporal sampling control.")
     if (args.shift_frames is not None and args.shift_frames < 1) or args.max_cases < 1:
         parser.error("shift_frames, when supplied, and max_cases must be positive.")
     pairs = relocation_pairs(read_jsonl(args.manifest_path), args.max_cases, args.shift_frames)
@@ -165,11 +185,7 @@ def main():
     source_paths = {}
     source_hashes = {}
     for row, _ in pairs:
-        path = Path(args.project_root) / row["video_path"]
-        if not path.is_file():
-            path = Path(row["video_path"])
-        if not path.is_file():
-            raise FileNotFoundError(row["video_path"])
+        path = resolve_video_path(row["video_path"], args.project_root, args.path_map)
         pair_id = row["phase3b_pair_id"]
         source_paths[pair_id] = path
         source_hashes[pair_id] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -178,7 +194,7 @@ def main():
         "source_commit": repo_commit(),
         "code_sha256": {
             name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
-            for name in ("run_phase3b_relocation_control.py", "phase3b_core.py", "run_phase3b_patching.py")
+            for name in ("run_phase3b_relocation_control.py", "phase3b_core.py", "run_phase3b_patching.py", "phase3b_paths.py")
         },
         "model_name": args.model_name, "revision": args.model_revision,
         "transformers_version": transformers.__version__,
@@ -191,6 +207,8 @@ def main():
         "seed": args.seed, "layers": layers,
         "source_ids": [row["eval_id"] for row, _ in pairs],
         "source_video_sha256_by_pair": source_hashes,
+        "gpu_hardware": gpu_hardware_metadata(), "single_gpu": args.single_gpu,
+        "path_map": args.path_map,
     }, sort_keys=True).encode()).hexdigest()
     config_path = output_dir / "relocation_config.json"
     if config_path.exists():
@@ -214,6 +232,8 @@ def main():
     model, processor = load_model(
         args.model_name, model_revision=args.model_revision, attn_implementation="eager"
     )
+    if args.single_gpu:
+        validate_single_gpu_model(model)
     print(f"Relocation model loaded after {(time.perf_counter() - started) / 60:.1f} min", flush=True)
     results = []
     audits = []
@@ -256,12 +276,13 @@ def main():
         original_prepared = prepare_example(
             row, processor, args.project_root, args.video_fps,
             args.video_num_frames, args.video_max_pixels, args.roi_padding, model.device,
+            args.path_map,
         )
         prepared = {
             "base": prepare_example(base_row, processor, args.project_root, args.video_fps,
-                                    args.video_num_frames, args.video_max_pixels, args.roi_padding, model.device),
+                                    args.video_num_frames, args.video_max_pixels, args.roi_padding, model.device, args.path_map),
             "shifted": prepare_example(shift_row, processor, args.project_root, args.video_fps,
-                                       args.video_num_frames, args.video_max_pixels, args.roi_padding, model.device),
+                                       args.video_num_frames, args.video_max_pixels, args.roi_padding, model.device, args.path_map),
         }
         original_decision = decision_from_logits(
             no_patch_forward(model, original_prepared), processor, row["correct_option"]
@@ -339,6 +360,8 @@ def main():
     atomic_write_json(output_dir / "relocation_config.json", {
         "model_name": args.model_name, "model_revision": args.model_revision,
         "fingerprint": fingerprint,
+        "gpu_hardware": gpu_hardware_metadata(), "single_gpu": args.single_gpu,
+        "path_map": args.path_map,
         "event_2_shift_frames_by_pair": {row["phase3b_pair_id"]: shift for row, shift in pairs},
         "source_video_sha256_by_pair": source_hashes,
         "layers": layers, "case_count": len(pairs),

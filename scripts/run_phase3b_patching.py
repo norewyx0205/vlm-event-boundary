@@ -3,6 +3,8 @@
 import argparse
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import time
 import traceback
@@ -22,6 +24,7 @@ try:
         validate_archived_input_metadata, validate_archived_prediction,
     )
     from .common import PROJECT_ROOT, read_jsonl
+    from .phase3b_paths import load_path_map, resolve_video_path
     from .phase3b_core import (
         SCHEMA, GROUPS, PATCH_LAYERS, TEXT_GROUPS, VIDEO_GROUPS,
         mover_roles, prepare_example,
@@ -35,6 +38,7 @@ except ImportError:
         validate_archived_input_metadata, validate_archived_prediction,
     )
     from common import PROJECT_ROOT, read_jsonl
+    from phase3b_paths import load_path_map, resolve_video_path
     from phase3b_core import SCHEMA, GROUPS, PATCH_LAYERS, TEXT_GROUPS, VIDEO_GROUPS, mover_roles, prepare_example
     from probe_attention_roi import model_forward, standard_first_token
     from run_eval import configure_reproducibility, environment_metadata, load_model
@@ -54,6 +58,33 @@ def repo_commit():
         capture_output=True, text=True, check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else None
+
+
+def gpu_hardware_metadata():
+    return {
+        "cuda_runtime": torch.version.cuda,
+        "device_count": torch.cuda.device_count(),
+        "devices": [
+            {
+                "name": torch.cuda.get_device_properties(index).name,
+                "total_memory_bytes": torch.cuda.get_device_properties(index).total_memory,
+                "compute_capability": list(torch.cuda.get_device_capability(index)),
+            }
+            for index in range(torch.cuda.device_count())
+        ],
+    }
+
+
+def validate_single_gpu_model(model=None):
+    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+        raise RuntimeError("VM worker requires exactly one visible CUDA GPU. Set CUDA_VISIBLE_DEVICES to one GPU ID.")
+    if model is not None:
+        placements = getattr(model, "hf_device_map", None) or {"": model.device}
+        if any(str(device) not in {"0", "cuda", "cuda:0"} for device in placements.values()):
+            raise RuntimeError(
+                f"Model was offloaded or spread across devices: {placements}. "
+                "A single A10 must fit the unchanged FP16 model; do not silently quantize or offload."
+            )
 
 
 def case_pairs(rows):
@@ -179,6 +210,9 @@ def _capture_all_layers(model, processor, prepared, root, fingerprint, verify_st
             raise RuntimeError(f"Standard-generation parity failed: {standard}.")
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
+    capture_bytes = sum(vectors.numel() * vectors.element_size() for vectors in snapshots.values())
+    if shutil.disk_usage(root).free < capture_bytes * 1.1 + 512 * 1024**2:
+        raise RuntimeError("Persistent disk cannot hold this activation capture. Back up existing outputs; do not delete unverified checkpoints.")
     norm_trajectories = {}
     for layer, vectors in snapshots.items():
         path = root / f"layer_{layer:02d}.pt"
@@ -469,6 +503,7 @@ def prepare_pair(pair, processor, args, device):
         condition: prepare_example(
             row, processor, args.project_root, args.video_fps, args.video_num_frames,
             args.video_max_pixels, args.roi_padding, device,
+            getattr(args, "path_map", None),
         )
         for condition, row in pair.items()
     }
@@ -620,12 +655,17 @@ def main():
     parser.add_argument("--mapping_path", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--project_root", default=str(PROJECT_ROOT))
+    parser.add_argument("--path_map_path", default=None)
+    parser.add_argument("--single_gpu", action="store_true")
+    parser.add_argument("--expected_gpu_hardware_path", default=None)
     parser.add_argument("--shard_index", type=int, default=0)
     parser.add_argument("--shard_size", type=int, default=5)
     parser.add_argument("--direction", choices=("both", "temporal_to_low", "low_to_temporal"), default="both")
     parser.add_argument("--model_name", default="Qwen/Qwen3-VL-8B-Instruct")
     parser.add_argument("--model_revision", default="0c351dd01ed87e9c1b53cbc748cba10e6187ff3b")
     parser.add_argument("--expected_transformers_version", default="5.9.0")
+    parser.add_argument("--expected_torch_version", default=None)
+    parser.add_argument("--expected_qwen_vl_utils_version", default=None)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--video_fps", type=float, default=None)
     parser.add_argument("--video_num_frames", type=int, default=None)
@@ -638,10 +678,21 @@ def main():
     parser.add_argument("--continue_on_error", action="store_true")
     parser.add_argument("--no_require_complete", dest="require_complete", action="store_false")
     args = parser.parse_args()
+    args.path_map = load_path_map(args.path_map_path)
+    if args.single_gpu:
+        validate_single_gpu_model()
+    if args.expected_gpu_hardware_path:
+        expected_gpu = json.loads(Path(args.expected_gpu_hardware_path).read_text(encoding="utf-8"))["gpu_hardware"]
+        if gpu_hardware_metadata() != expected_gpu:
+            parser.error("GPU hardware/runtime differs from the VM preflight. Use a new run root and repeat preflight.")
     if args.video_fps is not None and args.video_num_frames is not None:
         parser.error("Use only one temporal sampling control.")
     if args.expected_transformers_version and transformers.__version__ != args.expected_transformers_version:
         parser.error(f"Expected transformers {args.expected_transformers_version}, got {transformers.__version__}.")
+    if args.expected_torch_version and torch.__version__.split("+")[0] != args.expected_torch_version:
+        parser.error(f"Expected torch {args.expected_torch_version}, got {torch.__version__}.")
+    if args.expected_qwen_vl_utils_version and version("qwen-vl-utils") != args.expected_qwen_vl_utils_version:
+        parser.error(f"Expected qwen-vl-utils {args.expected_qwen_vl_utils_version}, got {version('qwen-vl-utils')}.")
     configure_reproducibility(args.seed, deterministic=True)
     pairs = select_shard(case_pairs(read_jsonl(args.manifest_path)), args.shard_index, args.shard_size)
     if not pairs:
@@ -657,7 +708,7 @@ def main():
             name: file_digest(Path(__file__).parent / name)
             for name in (
                 "run_phase3b_patching.py", "phase3b_core.py", "probe_attention_roi.py",
-                "run_eval.py", "activation_patching_core.py",
+                "run_eval.py", "activation_patching_core.py", "phase3b_paths.py",
             )
         },
         "manifest_sha256": file_digest(args.manifest_path),
@@ -669,12 +720,19 @@ def main():
         "video_num_frames": args.video_num_frames, "video_max_pixels": args.video_max_pixels,
         "roi_padding": args.roi_padding, "attn_implementation": args.attn_implementation,
         "validate_controls": args.validate_controls,
+        "verify_standard_generation": args.verify_standard_generation,
+        "gpu_hardware": gpu_hardware_metadata(), "single_gpu": args.single_gpu,
+        "path_map": args.path_map,
+        "video_sha256_by_eval_id": {
+            row["eval_id"]: file_digest(resolve_video_path(row["video_path"], args.project_root, args.path_map))
+            for pair in pairs.values() for row in pair.values()
+        },
         "shard_index": args.shard_index, "shard_size": args.shard_size,
         "pair_ids": list(pairs),
     }
     fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True).encode()).hexdigest()
     prepare_shard_run_config(
-        root, fingerprint, fingerprint_payload,
+        root, fingerprint, {**fingerprint_payload, "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES")},
         allow_failed_recovery=args.stage == "capture",
     )
     print(f"Phase 3B {args.stage} shard {args.shard_index}: {len(pairs)} pairs", flush=True)
@@ -683,6 +741,8 @@ def main():
         args.model_name, model_revision=args.model_revision,
         attn_implementation=args.attn_implementation,
     )
+    if args.single_gpu:
+        validate_single_gpu_model(model)
     if args.stage == "capture":
         run_capture_stage(args, model, processor, pairs, mappings, root, fingerprint)
     else:

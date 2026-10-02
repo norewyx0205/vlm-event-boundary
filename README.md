@@ -1246,3 +1246,89 @@ mirrored prompt, as the unit of inference. The selective rescue cohort and
 small preflight are exploratory; bootstrap intervals are diagnostic rather
 than population-level confirmation. Full Qwen3-VL execution requires the pinned
 Colab runtime and a GPU; local unit tests do not validate model behavior.
+
+### SURF VM: Two A10 GPUs
+
+Use [notebooks/phase3b_vm.ipynb](notebooks/phase3b_vm.ipynb), not Colab's
+`Run all`, on the VM. The VM entry point uses the frozen 50 rescue cases and
+secondary controls without generating videos or re-screening candidates.
+GPU 0 receives shards 0,2,4,...; GPU 1 receives shards 1,3,5,... . Each
+subprocess has exactly one visible GPU. This is data/shard parallelism, not
+pooled GPU memory: the unchanged FP16 model must fit one A10. CPU/disk model
+offloading is rejected. No sampling, precision, mapping, or patch-grid changes
+are made to reduce memory use.
+
+Keep the repository, input videos, model caches, logs, checkpoints and backups
+on **`/data/yuxuanstorage`**, not `/mnt/scratch`. The VM runner pins the expected
+core runtime to Transformers 5.9.0, PyTorch 2.11.0 and qwen-vl-utils 0.0.14;
+use the same CUDA-enabled environment as the archived experiment. It does not
+install packages or silently substitute library versions.
+
+Before running, copy these files from Colab/Drive to persistent storage:
+
+- `analysis/phase3b/selection_v2_controls` from `1001_phase3B_output.zip`, to
+  `/data/yuxuanstorage/vlm_phase3b/analysis/selection_v2_controls`.
+- The Drive `vlm_phase3b/rescue_pool` directory, including its original MP4s,
+  to `/data/yuxuanstorage/vlm_phase3b/rescue_pool`.
+- The existing `data/l5_feature_ablation_v1/L5_full/videos` MP4s to the same
+  relative location in the VM repository. The ZIP does **not** contain videos.
+
+The path map translates old Colab paths at read time; frozen manifests are
+not rewritten. The CPU plan checks every referenced video and records its
+SHA-256. Use a fresh A10 output root, never the A100 checkpoint directory.
+
+```bash
+python scripts/run_phase3b_vm.py --stage plan \
+  --selection_dir /data/yuxuanstorage/vlm_phase3b/analysis/selection_v2_controls \
+  --rescue_pool_root /data/yuxuanstorage/vlm_phase3b/rescue_pool \
+  --output_root /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v1 --gpus 0,1
+```
+
+Then repeat this command with `--stage preflight`. It runs the same two
+frozen preflight cases on **each A10**, verifies prediction/input/generation
+parity and technical controls, then runs the matched temporal-relocation
+control on GPU 0. Review the results before switching to `--stage full`.
+The old A100 preflight does not satisfy the VM gate. A10 rounding differences
+or an out-of-memory failure must be diagnosed rather than relaxing parity or
+changing the scientific settings automatically.
+
+`full` runs disjoint five-case shards, both patch directions, and a strict
+CPU merge. `--stage analyze` re-runs only CPU analysis. GPU hardware is part of
+shard provenance; mixed A100/A10 or incompatible runtime shards are rejected.
+Per-worker tracebacks are streamed and saved under `logs/`, with elapsed time
+and checkpoints under `progress/`. Re-run the same command/configuration to
+resume; successful capture and patch checkpoints are preserved. An exclusive
+lock prevents duplicate orchestrators from writing to the same run root.
+
+### Back Up After Every VM Run
+
+The VM notebook's last cell creates a **full** backup, including saved `.pt`
+activations, run configs, mapping/selection, logs, analyses and the referenced
+source videos. The Colab notebook's last cell retains its reports-only download
+on Colab, but dispatches to this full backup on the VM when
+`PHASE3B_VM_OUTPUT_ROOT` is set. Do not confuse the historical reports ZIP,
+which omitted `.pt` files, with a resumable checkpoint backup.
+
+```bash
+python scripts/backup_phase3b.py \
+  --run_root /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v1 \
+  --backup_dir /data/yuxuanstorage/backups
+```
+
+Timestamped ZIP parts (approximately 4 GiB uncompressed per part, except a
+single larger file), `backup_manifest.json`, and `SHA256SUMS` are written to
+persistent storage. Download **all files** in that backup directory through
+the VM file browser, or transfer them with scp/rsync. On your own computer:
+
+```bash
+python scripts/backup_phase3b.py --verify <downloaded-backup-directory>
+```
+
+Verification checks both archive and individual file SHA-256 hashes. Packaging
+on the VM does not establish that a local backup exists. Keep the persistent
+VM originals until the downloaded copy has been verified. If there is not
+enough disk space for a second full copy, transfer the run directory and frozen
+videos directly to your computer; do not delete checkpoints to create space.
+`--reports_only` is an explicit lighter export, **not** a backup of activations.
+Stop all workers before packaging; interrupted/failed outputs can also be
+backed up and their completion status is retained in the manifest.

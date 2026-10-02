@@ -203,13 +203,12 @@ def mover_roles(first_object_id):
 
 
 def prepare_example(row, processor, project_root, video_fps=None, video_num_frames=None,
-                    video_max_pixels=None, padding=8, device=None):
-    from pathlib import Path
-    video_path = Path(project_root) / row["video_path"]
-    if not video_path.is_file():
-        video_path = Path(row["video_path"])
-    if not video_path.is_file():
-        raise FileNotFoundError(row["video_path"])
+                    video_max_pixels=None, padding=8, device=None, path_map=None):
+    try:
+        from .phase3b_paths import resolve_video_path
+    except ImportError:
+        from phase3b_paths import resolve_video_path
+    video_path = resolve_video_path(row["video_path"], project_root, path_map)
     messages = build_messages(
         str(video_path), row["option_A"], row["option_B"], video_fps,
         video_num_frames, video_max_pixels, row.get("question"),

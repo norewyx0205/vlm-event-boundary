@@ -70,6 +70,7 @@ def read_shards(root):
         "model_name", "model_revision", "transformers_version", "qwen_vl_utils_version",
         "torch_version", "seed", "validate_controls",
         "video_fps", "video_num_frames", "video_max_pixels", "roi_padding", "attn_implementation",
+        "gpu_hardware", "single_gpu", "path_map", "verify_standard_generation",
     )
     for config in configs[1:]:
         if any(config.get(key) != configs[0].get(key) for key in shared):
