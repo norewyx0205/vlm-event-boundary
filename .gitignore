@@ -2,6 +2,11 @@
 __pycache__/
 *.py[cod]
 .ipynb_checkpoints/
+.env
+.env.*
+!.env.example
+.phase3b_private/
+surf_private*.json
 
 # macOS/editor metadata
 .DS_Store

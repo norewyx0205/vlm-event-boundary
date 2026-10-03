@@ -1349,3 +1349,125 @@ videos directly to your computer; do not delete checkpoints to create space.
 `--reports_only` is an explicit lighter export, **not** a backup of activations.
 Stop all workers before packaging; interrupted/failed outputs can also be
 backed up and their completion status is retained in the manifest.
+
+### Detached Runs and Optional SURF Pause
+
+Use `scripts/launch_phase3b_vm.py` for the **next** long VM run. It launches
+`run_phase3b_unattended.py` in a detached tmux session using the same Python
+environment. Closing the browser or your local computer does not terminate
+that session; pausing/rebooting the VM or killing the tmux server does.
+Do **not** restart or duplicate a preflight that is already running.
+The launcher does not change model placement, sampling, patching or the
+scientific pipeline fingerprint. A completed A10 preflight in `run_v2_mp`
+is still required before `full`.
+
+Install tmux once on the VM:
+
+```bash
+sudo apt install tmux
+```
+
+Automatic Pause is **off by default**. To enable it, create a personal token
+in the SURF portal under **Profile > API tokens**, with an expiration beyond
+the planned run. Your account must be able to pause the workspace; ask its
+owner if the read-only permission check fails. Never put the token in chat,
+a notebook, a shell argument, Git, or an experiment backup.
+In an activated VM terminal, run:
+
+```bash
+python scripts/surf_workspace.py setup \
+  --workspace_id <workspace-UUID-from-SURF-Details> \
+  --workspace_name YuxuanVM
+python scripts/surf_workspace.py check
+```
+
+`setup` prompts for the token without echo, checks the exact workspace UUID,
+name, running state and Pause permission, then creates
+`/data/yuxuanstorage/.phase3b_private/surf.json` (file mode `600`, directory
+mode `700`). It refuses to overwrite existing credentials. `check` is a GET
+only: neither command pauses anything. Use the exact portal name if it has
+changed. A custom `--config_path` must remain outside the repository, run,
+backup and lifecycle directories. The unattended runner rejects unsafe
+permissions/locations and never copies this file into backups.
+
+Once the A10 preflight has passed and **no other person or job needs this
+workspace**, launch the full run from the activated environment:
+
+```bash
+python scripts/launch_phase3b_vm.py \
+  --stage full --session_name phase3b_full \
+  --output_root /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v2_mp \
+  --pause_policy success --confirm_exclusive_workspace \
+  -- \
+  --selection_dir /data/yuxuanstorage/vlm_phase3b/analysis/selection_v2_controls \
+  --rescue_pool_root /data/yuxuanstorage/vlm_phase3b/rescue_pool \
+  --gpus 0,1 --execution_mode model_parallel --gpu_weight_budget_gib 10
+```
+
+`--dry_run` prints the launch command without tmux, API requests, file writes
+or GPU work. For background execution **without** automatic Pause, omit
+`--pause_policy success --confirm_exclusive_workspace`.
+Stage/output/storage/project options belong before `--`; ordinary VM options
+belong after it. The VM notebook has equivalent background/Pause switches.
+In background mode its last cell displays status rather than trying to
+archive an experiment that has just started.
+
+Monitor from another terminal (both files are on persistent storage):
+
+```bash
+tmux attach -t phase3b_full
+tail -f /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v2_mp_lifecycle/job.log
+python -m json.tool /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v2_mp_lifecycle/job_status.json
+```
+
+After attaching, `Ctrl+B`, then `D` detaches without interrupting the job.
+Do not use `Ctrl+C` or `tmux kill-session` just to disconnect. The session
+can disappear after completion; logs and status remain. Check the initial
+log/status for errors before leaving it unattended. Re-run the same launch
+command only after the previous job has stopped; scientific checkpoints
+resume without recomputing completed work. Duplicate sessions and run locks
+are rejected.
+
+The completion sequence is:
+
+```text
+experiment exits -> persist return code/completion status and log snapshot
+-> full timestamped backup (including activations and frozen source videos)
+-> verify archive and file SHA-256 checksums
+-> confirm no remaining GPU processes or known research runners
+-> request SURF Pause only if the explicit policy permits it
+```
+
+- `off`: always back up and verify, but never call Pause.
+- `success`: pause only if the VM stage returned success and recorded complete.
+  A failed run is still backed up, but the VM stays running for diagnosis.
+- `finished`: after a verified full backup, also pause a failed/interrupted run
+  once its workers have stopped. Use this explicit option to limit idle
+  compute costs on failure; resume the workspace later to inspect checkpoints.
+
+Backup failure, insufficient disk space, checksum failure, unsafe credentials,
+other GPU jobs, or API errors prevent an unconfirmed Pause from being treated
+as successful. Check `needs_attention` in the journal and the SURF portal:
+the VM may still be running and charging. Unrelated CPU workloads cannot all
+be detected automatically, so `--confirm_exclusive_workspace` is a real
+operator confirmation, not a substitute for coordinating with colleagues.
+An API timeout is ambiguous and is **not automatically retried**. The wrapper
+writes `pause_request_pending` before submitting it, because the VM may be
+paused before it can save an acknowledgement. `pause_requested` means the
+request was accepted, not that the transition or billing stop is confirmed.
+Check that the portal shows **paused**; storage may still incur charges.
+Only Pause is implemented: no Delete, volume removal, or Linux shutdown.
+
+The verified bundle is saved under `/data/yuxuanstorage/backups`.
+**It is still a VM-side copy, not a local backup.** Download all bundle files
+and verify them on your computer as described above. If the workspace has
+already paused, resume briefly for transfer and pause again afterwards;
+never delete originals before the local copy is verified.
+The lifecycle journal is a sibling of the run directory so it does not
+invalidate a fresh run's provenance. Its final Pause acknowledgement remains
+in that journal; the backup includes the pre-Pause run status and log snapshot.
+
+The API authentication and workspace actions follow the official
+[SURF API guide](https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/117178402/SRC%2BAPI)
+and [workspace OpenAPI schema](https://gw.live.surfresearchcloud.nl/v1/workspace/swagger/schema/).
+Session lifecycle follows the [tmux manual](https://man.openbsd.org/tmux.1).
