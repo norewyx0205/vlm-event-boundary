@@ -275,8 +275,14 @@ def load_model(
     load_in_4bit=False,
     model_revision=None,
     attn_implementation=None,
+    device_map=None,
+    max_memory=None,
 ):
     kwargs = model_kwargs(load_in_4bit, model_revision, attn_implementation)
+    if device_map is not None:
+        kwargs["device_map"] = device_map
+    if max_memory is not None:
+        kwargs["max_memory"] = max_memory
     processor_kwargs = {"revision": model_revision} if model_revision else {}
     if AutoModelForImageTextToText is not None:
         try:

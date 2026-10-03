@@ -23,11 +23,13 @@ try:
     from .common import PROJECT_ROOT, read_jsonl
     from .phase3b_paths import load_path_map, resolve_video_path
     from .phase3b_core import VIDEO_GROUPS, build_pair_mappings, prepare_example
-    from .run_eval import configure_reproducibility, load_model
+    from .run_eval import configure_reproducibility
     from .run_phase3b_patching import (
         _capture_all_layers, activation_root, load_capture, no_patch_forward, patch_forward,
         repo_commit, validate_patch_controls,
         gpu_hardware_metadata, validate_single_gpu_model,
+        validate_model_parallel_model, load_phase3b_model, model_placement_settings,
+        record_model_placement, validate_preflight_hardware,
     )
 except ImportError:
     from activation_patching_core import (
@@ -37,11 +39,13 @@ except ImportError:
     from common import PROJECT_ROOT, read_jsonl
     from phase3b_paths import load_path_map, resolve_video_path
     from phase3b_core import VIDEO_GROUPS, build_pair_mappings, prepare_example
-    from run_eval import configure_reproducibility, load_model
+    from run_eval import configure_reproducibility
     from run_phase3b_patching import (
         _capture_all_layers, activation_root, load_capture, no_patch_forward, patch_forward,
         repo_commit, validate_patch_controls,
         gpu_hardware_metadata, validate_single_gpu_model,
+        validate_model_parallel_model, load_phase3b_model, model_placement_settings,
+        record_model_placement, validate_preflight_hardware,
     )
 
 
@@ -143,7 +147,11 @@ def main():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--project_root", default=str(PROJECT_ROOT))
     parser.add_argument("--path_map_path", default=None)
-    parser.add_argument("--single_gpu", action="store_true")
+    placement = parser.add_mutually_exclusive_group()
+    placement.add_argument("--single_gpu", action="store_true")
+    placement.add_argument("--model_parallel", action="store_true")
+    parser.add_argument("--gpu_weight_budget_gib", type=float, default=10)
+    parser.add_argument("--expected_gpu_hardware_path", default=None)
     parser.add_argument("--expected_transformers_version", default=None)
     parser.add_argument("--expected_torch_version", default=None)
     parser.add_argument("--expected_qwen_vl_utils_version", default=None)
@@ -163,6 +171,9 @@ def main():
     args.path_map = load_path_map(args.path_map_path)
     if args.single_gpu:
         validate_single_gpu_model()
+    if args.model_parallel:
+        validate_model_parallel_model(weight_budget_gib=args.gpu_weight_budget_gib)
+    validate_preflight_hardware(args)
     if args.expected_transformers_version and transformers.__version__ != args.expected_transformers_version:
         parser.error(f"Expected transformers {args.expected_transformers_version}, got {transformers.__version__}.")
     if args.expected_torch_version and torch.__version__.split("+")[0] != args.expected_torch_version:
@@ -208,6 +219,7 @@ def main():
         "source_ids": [row["eval_id"] for row, _ in pairs],
         "source_video_sha256_by_pair": source_hashes,
         "gpu_hardware": gpu_hardware_metadata(), "single_gpu": args.single_gpu,
+        **model_placement_settings(args),
         "path_map": args.path_map,
     }, sort_keys=True).encode()).hexdigest()
     config_path = output_dir / "relocation_config.json"
@@ -229,11 +241,10 @@ def main():
         f"checkpoint={output_dir}",
         flush=True,
     )
-    model, processor = load_model(
-        args.model_name, model_revision=args.model_revision, attn_implementation="eager"
-    )
-    if args.single_gpu:
-        validate_single_gpu_model(model)
+    model, processor = load_phase3b_model(args)
+    if not config_path.is_file():
+        atomic_write_json(config_path, {"fingerprint": fingerprint, **model_placement_settings(args)})
+    record_model_placement(config_path, model, args.expected_gpu_hardware_path)
     print(f"Relocation model loaded after {(time.perf_counter() - started) / 60:.1f} min", flush=True)
     results = []
     audits = []
@@ -361,6 +372,8 @@ def main():
         "model_name": args.model_name, "model_revision": args.model_revision,
         "fingerprint": fingerprint,
         "gpu_hardware": gpu_hardware_metadata(), "single_gpu": args.single_gpu,
+        **model_placement_settings(args),
+        "model_device_map": json.loads(config_path.read_text(encoding="utf-8"))["model_device_map"],
         "path_map": args.path_map,
         "event_2_shift_frames_by_pair": {row["phase3b_pair_id"]: shift for row, shift in pairs},
         "source_video_sha256_by_pair": source_hashes,

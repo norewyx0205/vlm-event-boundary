@@ -1,4 +1,4 @@
-"""Run frozen Phase 3B shards on isolated VM GPUs; never generate or re-screen cases."""
+"""Run frozen Phase 3B shards with isolated replicas or one two-GPU model; never re-screen cases."""
 
 import argparse
 import fcntl
@@ -66,6 +66,21 @@ def shard_schedule(pair_count, gpus, shard_size=5):
     if pair_count < 1 or shard_size < 1:
         raise ValueError("Pair count and shard size must be positive.")
     return {gpu: list(range(index, math.ceil(pair_count / shard_size), len(gpus))) for index, gpu in enumerate(gpus)}
+
+
+def execution_schedule(args, pair_count):
+    if args.execution_mode == "model_parallel":
+        return {"model_parallel": list(range(math.ceil(pair_count / 5)))}
+    return shard_schedule(pair_count, args.gpus)
+
+
+def visible_devices(args, worker):
+    return ",".join(args.gpus) if args.execution_mode == "model_parallel" else worker
+
+
+def preflight_directory(args, worker):
+    name = "model_parallel" if args.execution_mode == "model_parallel" else f"gpu_{worker}"
+    return Path(args.output_root) / "preflight" / name
 
 
 def worker_environment(gpu, storage_root):
@@ -148,10 +163,13 @@ def build_plan(args):
         "video_max_pixels": args.video_max_pixels, "roi_padding": 8, "shard_size": 5,
         "video_sha256": video_hashes, "video_paths_by_eval_id": video_paths,
         "pair_count": len(pairs["full"]), "primary_count": 50,
+        "execution_mode": args.execution_mode,
+        "gpu_weight_budget_gib": args.gpu_weight_budget_gib if args.execution_mode == "model_parallel" else None,
+        "gpus": args.gpus,
     }
     fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     return {**payload, "pipeline_fingerprint": fingerprint,
-            "schedule": shard_schedule(len(pairs["full"]), args.gpus), "gpus": args.gpus}
+            "schedule": execution_schedule(args, len(pairs["full"]))}
 
 
 def save_plan(root, plan):
@@ -236,7 +254,11 @@ def model_options(args):
                "--expected_torch_version", args.expected_torch_version,
                "--expected_qwen_vl_utils_version", args.expected_qwen_vl_utils_version,
                "--seed", str(args.seed), "--project_root", args.project_root,
-               "--path_map_path", str(Path(args.output_root) / "path_map.json"), "--single_gpu"]
+               "--path_map_path", str(Path(args.output_root) / "path_map.json")]
+    if args.execution_mode == "model_parallel":
+        options.extend(["--model_parallel", "--gpu_weight_budget_gib", str(args.gpu_weight_budget_gib)])
+    else:
+        options.append("--single_gpu")
     for name in ("video_fps", "video_num_frames", "video_max_pixels"):
         if getattr(args, name) is not None:
             options.extend([f"--{name}", str(getattr(args, name))])
@@ -249,16 +271,17 @@ def run_shards(args, runner, manifest, checkpoint, assignments):
             for stage in ("capture", "patch"):
                 hardware_options = []
                 if args.stage == "full":
-                    hardware_options = ["--expected_gpu_hardware_path", str(Path(args.output_root) / "preflight" / f"gpu_{gpu}/checkpoints/shard_00/run_config.json")]
+                    hardware_options = ["--expected_gpu_hardware_path", str(preflight_directory(args, gpu) / "checkpoints/shard_00/run_config.json")]
                 runner.run([
                     sys.executable, "-u", "scripts/run_phase3b_patching.py", "--stage", stage,
                     "--manifest_path", str(manifest), "--mapping_path", str(Path(args.selection_dir) / "selected_video_mappings.jsonl"),
                     "--output_dir", str(checkpoint(gpu)), "--shard_index", str(shard), "--shard_size", "5",
                     "--attn_implementation", "eager", "--roi_padding", "8", "--empty_cache_each_pair",
                     *model_options(args), *hardware_options,
-                ], f"gpu_{gpu}_shard_{shard:02d}_{stage}", gpu)
+                ], f"{gpu}_shard_{shard:02d}_{stage}", visible_devices(args, gpu))
                 write_json(Path(args.output_root) / "progress" / f"gpu_{gpu}.json", {
-                    "stage": args.stage, "gpu": gpu, "shard": shard, "checkpoint_stage": stage,
+                    "stage": args.stage, "worker": gpu, "visible_gpus": visible_devices(args, gpu),
+                    "execution_mode": args.execution_mode, "shard": shard, "checkpoint_stage": stage,
                     "elapsed_sec": time.perf_counter() - runner.started,
                     "completed_shards": [i for i in shards if i < shard] + ([shard] if stage == "patch" else []),
                 })
@@ -305,8 +328,8 @@ def require_vm_preflight(args, plan):
     saved = json.loads(path.read_text(encoding="utf-8"))
     if not saved.get("complete") or saved.get("pipeline_fingerprint") != plan["pipeline_fingerprint"] or not set(args.gpus) <= set(saved["gpus"]):
         raise RuntimeError("VM preflight does not match this code/cohort/GPU allocation.")
-    for gpu in args.gpus:
-        require = Path(args.output_root) / "preflight" / f"gpu_{gpu}"
+    for gpu in execution_schedule(args, 2):
+        require = preflight_directory(args, gpu)
         capture_audit(require / "checkpoints")
         if not (require / "analysis/aggregate_summary.json").is_file():
             raise RuntimeError("VM preflight analysis is missing.")
@@ -323,6 +346,10 @@ def main():
     parser.add_argument("--storage_root", default="/data/yuxuanstorage")
     parser.add_argument("--project_root", default=str(PROJECT_ROOT))
     parser.add_argument("--gpus", default="0,1")
+    parser.add_argument("--execution_mode", choices=("independent", "model_parallel"), default="model_parallel",
+                        help="model_parallel: one FP16 model across two GPUs, reserving attention workspace.")
+    parser.add_argument("--gpu_weight_budget_gib", type=float, default=10,
+                        help="Model-parallel weight placement budget per GPU, not a total VRAM limit.")
     parser.add_argument("--model_name", default="Qwen/Qwen3-VL-8B-Instruct")
     parser.add_argument("--model_revision", default="0c351dd01ed87e9c1b53cbc748cba10e6187ff3b")
     parser.add_argument("--expected_transformers_version", default="5.9.0")
@@ -334,6 +361,8 @@ def main():
     parser.add_argument("--video_max_pixels", type=int, default=None)
     args = parser.parse_args()
     args.gpus = parse_gpus(args.gpus)
+    if args.execution_mode == "model_parallel" and (len(args.gpus) != 2 or not math.isfinite(args.gpu_weight_budget_gib) or args.gpu_weight_budget_gib <= 0):
+        parser.error("Model parallel requires two GPU IDs and a positive finite weight budget.")
     if args.video_fps is not None and args.video_num_frames is not None:
         parser.error("Use only one temporal sampling control.")
     for name in ("output_root", "selection_dir", "rescue_pool_root", "project_root", "storage_root"):
@@ -355,23 +384,26 @@ def main():
         try:
             if args.stage == "preflight":
                 manifest = Path(args.selection_dir) / "preflight_case_manifest.jsonl"
-                run_shards(args, runner, manifest, lambda gpu: root / "preflight" / f"gpu_{gpu}/checkpoints", {gpu: [0] for gpu in args.gpus})
+                workers = list(execution_schedule(args, 2))
+                run_shards(args, runner, manifest, lambda gpu: preflight_directory(args, gpu) / "checkpoints", {gpu: [0] for gpu in workers})
                 audits = {}
-                for gpu in args.gpus:
-                    base = root / "preflight" / f"gpu_{gpu}"
+                for gpu in workers:
+                    base = preflight_directory(args, gpu)
                     analyze(runner, manifest, base / "checkpoints", base / "analysis")
                     audits[gpu] = capture_audit(base / "checkpoints")
-                reference = audits[args.gpus[0]]
+                reference = audits[workers[0]]
                 for gpu, audit in audits.items():
                     if set(audit) != set(reference) or any(audit[key]["decision"]["prediction"] != reference[key]["decision"]["prediction"] for key in reference):
                         raise RuntimeError(f"Preflight predictions differ between GPUs: {gpu}.")
                 runner.run([sys.executable, "-u", "scripts/run_phase3b_relocation_control.py",
                             "--manifest_path", str(manifest), "--output_dir", str(root / "relocation_control"),
-                            *model_options(args)], "gpu_relocation_control", args.gpus[0])
+                            "--expected_gpu_hardware_path", str(preflight_directory(args, workers[0]) / "checkpoints/shard_00/run_config.json"),
+                            *model_options(args)], "gpu_relocation_control", visible_devices(args, workers[0]))
                 write_json(root / "vm_preflight_summary.json", {
                     "complete": True, "pipeline_fingerprint": plan["pipeline_fingerprint"], "gpus": args.gpus,
                     "capture_audits": audits,
-                    "cross_gpu_margin_differences": {gpu: {key: audit[key]["decision"]["margin"] - reference[key]["decision"]["margin"] for key in reference} for gpu, audit in audits.items()},
+                    "execution_mode": args.execution_mode,
+                    "cross_gpu_margin_differences": {gpu: {key: audit[key]["decision"]["margin"] - reference[key]["decision"]["margin"] for key in reference} for gpu, audit in audits.items()} if args.execution_mode == "independent" else None,
                     "elapsed_sec": time.perf_counter() - runner.started,
                     "interpretation": "Technical gate passed; inspect relocation effects before full run.",
                 })

@@ -1252,11 +1252,21 @@ Colab runtime and a GPU; local unit tests do not validate model behavior.
 Use [notebooks/phase3b_vm.ipynb](notebooks/phase3b_vm.ipynb), not Colab's
 `Run all`, on the VM. The VM entry point uses the frozen 50 rescue cases and
 secondary controls without generating videos or re-screening candidates.
-GPU 0 receives shards 0,2,4,...; GPU 1 receives shards 1,3,5,... . Each
-subprocess has exactly one visible GPU. This is data/shard parallelism, not
-pooled GPU memory: the unchanged FP16 model must fit one A10. CPU/disk model
-offloading is rejected. No sampling, precision, mapping, or patch-grid changes
-are made to reduce memory use.
+Use `--execution_mode model_parallel` on the two A10s: a single worker loads
+one FP16 model across both GPUs with balanced weight placement. The default
+10 GiB **weight budget per GPU** leaves room for eager-attention intermediates;
+it is not a cap on total CUDA memory. Both GPUs must hold parameters, and
+CPU/disk offloading is rejected. The VM notebook selects this mode by default.
+No sampling, precision, attention-backend, mapping, or patch-grid changes are
+made to reduce memory use. Actual module placement is recorded and checked
+against preflight and across resumed/merged shards.
+
+The opt-in `independent` scheduling mode remains available for hardware where
+a full replica **and forward workspace** fit each GPU. It assigns disjoint
+shards to isolated workers. The initial A10 independent-worker preflight
+loaded the model successfully but exhausted VRAM during eager attention;
+fitting weights alone does not establish that this mode is viable. Two-GPU
+model parallelism runs shards sequentially, not as two concurrent replicas.
 
 Keep the repository, input videos, model caches, logs, checkpoints and backups
 on **`/data/yuxuanstorage`**, not `/mnt/scratch`. The VM runner pins the expected
@@ -1281,20 +1291,27 @@ SHA-256. Use a fresh A10 output root, never the A100 checkpoint directory.
 python scripts/run_phase3b_vm.py --stage plan \
   --selection_dir /data/yuxuanstorage/vlm_phase3b/analysis/selection_v2_controls \
   --rescue_pool_root /data/yuxuanstorage/vlm_phase3b/rescue_pool \
-  --output_root /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v1 --gpus 0,1
+  --output_root /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v2_mp \
+  --gpus 0,1 --execution_mode model_parallel --gpu_weight_budget_gib 10
 ```
 
 Then repeat this command with `--stage preflight`. It runs the same two
-frozen preflight cases on **each A10**, verifies prediction/input/generation
-parity and technical controls, then runs the matched temporal-relocation
-control on GPU 0. Review the results before switching to `--stage full`.
+frozen preflight cases using **one model spanning both A10s**, verifies
+prediction/input/generation parity and technical controls, then runs the
+matched temporal-relocation control with the same placement strategy. Review
+the results before switching to `--stage full`. Independent mode instead
+checks both replicas and compares their predictions; this cross-replica check
+does not apply to model parallelism.
 The old A100 preflight does not satisfy the VM gate. A10 rounding differences
 or an out-of-memory failure must be diagnosed rather than relaxing parity or
-changing the scientific settings automatically.
+changing the scientific settings automatically. Keep the failed `run_v1`
+logs; the new execution mode/code must use a fresh output root. Frozen cases,
+source videos and the persistent model cache are reused without re-screening.
 
 `full` runs disjoint five-case shards, both patch directions, and a strict
-CPU merge. `--stage analyze` re-runs only CPU analysis. GPU hardware is part of
-shard provenance; mixed A100/A10 or incompatible runtime shards are rejected.
+CPU merge. `--stage analyze` re-runs only CPU analysis. GPU hardware, execution
+mode and weight placement are part of shard provenance; mixed A100/A10,
+independent/model-parallel or incompatible runtime shards are rejected.
 Per-worker tracebacks are streamed and saved under `logs/`, with elapsed time
 and checkpoints under `progress/`. Re-run the same command/configuration to
 resume; successful capture and patch checkpoints are preserved. An exclusive
@@ -1311,7 +1328,7 @@ which omitted `.pt` files, with a resumable checkpoint backup.
 
 ```bash
 python scripts/backup_phase3b.py \
-  --run_root /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v1 \
+  --run_root /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v2_mp \
   --backup_dir /data/yuxuanstorage/backups
 ```
 

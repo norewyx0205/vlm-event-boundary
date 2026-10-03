@@ -71,6 +71,7 @@ def read_shards(root):
         "torch_version", "seed", "validate_controls",
         "video_fps", "video_num_frames", "video_max_pixels", "roi_padding", "attn_implementation",
         "gpu_hardware", "single_gpu", "path_map", "verify_standard_generation",
+        "model_parallel", "model_device_map_strategy", "gpu_weight_budget_gib", "model_device_map",
     )
     for config in configs[1:]:
         if any(config.get(key) != configs[0].get(key) for key in shared):

@@ -87,6 +87,76 @@ def validate_single_gpu_model(model=None):
             )
 
 
+def model_placement_settings(args):
+    parallel = args.model_parallel
+    return {
+        "model_parallel": parallel,
+        "model_device_map_strategy": "balanced" if parallel else "auto",
+        "gpu_weight_budget_gib": args.gpu_weight_budget_gib if parallel else None,
+    }
+
+
+def validate_preflight_hardware(args):
+    if not args.expected_gpu_hardware_path:
+        return
+    expected = json.loads(Path(args.expected_gpu_hardware_path).read_text(encoding="utf-8"))
+    if gpu_hardware_metadata() != expected["gpu_hardware"] or any(
+        expected.get(key) != value for key, value in model_placement_settings(args).items()
+    ) or expected.get("single_gpu") != args.single_gpu:
+        raise RuntimeError("GPU hardware/placement settings differ from VM preflight. Use a new root and repeat preflight.")
+
+
+def validate_model_parallel_model(model=None, weight_budget_gib=10):
+    if not torch.cuda.is_available() or torch.cuda.device_count() != 2:
+        raise RuntimeError("Model-parallel execution requires exactly two visible CUDA GPUs.")
+    budget = int(weight_budget_gib * 1024 ** 3)
+    if weight_budget_gib <= 0 or any(
+        budget + 1024 ** 3 >= torch.cuda.get_device_properties(index).total_memory
+        for index in range(2)
+    ):
+        raise ValueError("Weight budget must be positive and leave CUDA workspace on each GPU.")
+    if model is None:
+        return
+    placements = getattr(model, "hf_device_map", None)
+    if not placements or any(str(device) not in {"0", "1", "cuda:0", "cuda:1"} for device in placements.values()):
+        raise RuntimeError(f"Model-parallel weights must stay on CUDA GPUs, without CPU/disk offload: {placements}.")
+    parameter_devices = {str(parameter.device) for parameter in model.parameters()}
+    if parameter_devices != {"cuda:0", "cuda:1"}:
+        raise RuntimeError(f"Both GPUs must hold model parameters, without offload: {parameter_devices}.")
+
+
+def load_phase3b_model(args):
+    options = {}
+    if args.model_parallel:
+        validate_model_parallel_model(weight_budget_gib=args.gpu_weight_budget_gib)
+        # max_memory limits weight placement, not the eager-attention workspace.
+        budget = int(args.gpu_weight_budget_gib * 1024 ** 3)
+        options = {"device_map": "balanced", "max_memory": {0: budget, 1: budget, "cpu": 0}}
+    model, processor = load_model(
+        args.model_name, model_revision=args.model_revision,
+        attn_implementation=getattr(args, "attn_implementation", "eager"), **options,
+    )
+    if args.single_gpu:
+        validate_single_gpu_model(model)
+    if args.model_parallel:
+        validate_model_parallel_model(model, args.gpu_weight_budget_gib)
+    if torch.cuda.is_available():
+        for index in range(torch.cuda.device_count()):
+            free, total = torch.cuda.mem_get_info(index)
+            print(f"CUDA {index} after model load: free={free / 1024 ** 3:.2f} / {total / 1024 ** 3:.2f} GiB", flush=True)
+    return model, processor
+
+
+def record_model_placement(config_path, model, expected_path=None):
+    actual = {name: str(device) for name, device in (getattr(model, "hf_device_map", None) or {"": model.device}).items()}
+    config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+    for prior in (config, json.loads(Path(expected_path).read_text(encoding="utf-8")) if expected_path else {}):
+        if prior.get("model_device_map") is not None and prior["model_device_map"] != actual:
+            raise RuntimeError("Actual model placement differs from the checkpoint/preflight. Use a new run root.")
+    atomic_write_json(config_path, {**config, "model_device_map": actual})
+    print(f"Model placement: {actual}", flush=True)
+
+
 def case_pairs(rows):
     grouped = defaultdict(dict)
     for row in rows:
@@ -656,7 +726,10 @@ def main():
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--project_root", default=str(PROJECT_ROOT))
     parser.add_argument("--path_map_path", default=None)
-    parser.add_argument("--single_gpu", action="store_true")
+    placement = parser.add_mutually_exclusive_group()
+    placement.add_argument("--single_gpu", action="store_true")
+    placement.add_argument("--model_parallel", action="store_true")
+    parser.add_argument("--gpu_weight_budget_gib", type=float, default=10)
     parser.add_argument("--expected_gpu_hardware_path", default=None)
     parser.add_argument("--shard_index", type=int, default=0)
     parser.add_argument("--shard_size", type=int, default=5)
@@ -681,10 +754,9 @@ def main():
     args.path_map = load_path_map(args.path_map_path)
     if args.single_gpu:
         validate_single_gpu_model()
-    if args.expected_gpu_hardware_path:
-        expected_gpu = json.loads(Path(args.expected_gpu_hardware_path).read_text(encoding="utf-8"))["gpu_hardware"]
-        if gpu_hardware_metadata() != expected_gpu:
-            parser.error("GPU hardware/runtime differs from the VM preflight. Use a new run root and repeat preflight.")
+    if args.model_parallel:
+        validate_model_parallel_model(weight_budget_gib=args.gpu_weight_budget_gib)
+    validate_preflight_hardware(args)
     if args.video_fps is not None and args.video_num_frames is not None:
         parser.error("Use only one temporal sampling control.")
     if args.expected_transformers_version and transformers.__version__ != args.expected_transformers_version:
@@ -722,6 +794,7 @@ def main():
         "validate_controls": args.validate_controls,
         "verify_standard_generation": args.verify_standard_generation,
         "gpu_hardware": gpu_hardware_metadata(), "single_gpu": args.single_gpu,
+        **model_placement_settings(args),
         "path_map": args.path_map,
         "video_sha256_by_eval_id": {
             row["eval_id"]: file_digest(resolve_video_path(row["video_path"], args.project_root, args.path_map))
@@ -737,12 +810,8 @@ def main():
     )
     print(f"Phase 3B {args.stage} shard {args.shard_index}: {len(pairs)} pairs", flush=True)
     started = time.perf_counter()
-    model, processor = load_model(
-        args.model_name, model_revision=args.model_revision,
-        attn_implementation=args.attn_implementation,
-    )
-    if args.single_gpu:
-        validate_single_gpu_model(model)
+    model, processor = load_phase3b_model(args)
+    record_model_placement(root / "run_config.json", model, args.expected_gpu_hardware_path)
     if args.stage == "capture":
         run_capture_stage(args, model, processor, pairs, mappings, root, fingerprint)
     else:

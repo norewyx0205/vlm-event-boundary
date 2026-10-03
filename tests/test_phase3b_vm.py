@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from scripts import backup_phase3b, run_phase3b_vm as vm, run_phase3b_patching, analyze_phase3b
+from scripts import backup_phase3b, run_phase3b_vm as vm, run_phase3b_patching, analyze_phase3b, run_eval
 from scripts.phase3b_paths import load_path_map, resolve_video_path
 
 
@@ -41,6 +41,7 @@ def setup_selection(directory):
                            storage_root=str(root), output_root=str(root / "run"), gpus=["0", "1"], stage="preflight",
                            model_name="Qwen/Qwen3-VL-8B-Instruct", model_revision="pinned", expected_transformers_version="5.9.0",
                            expected_torch_version="2.11.0", expected_qwen_vl_utils_version="0.0.14",
+                           execution_mode="independent", gpu_weight_budget_gib=10,
                            seed=42, video_fps=None, video_num_frames=None, video_max_pixels=None)
 
 
@@ -98,7 +99,7 @@ class VMTest(unittest.TestCase):
             command = [sys.executable, "scripts/run_phase3b_vm.py", "--stage", "plan",
                        "--selection_dir", args.selection_dir, "--rescue_pool_root", args.rescue_pool_root,
                        "--output_root", args.output_root, "--project_root", args.project_root,
-                       "--storage_root", args.storage_root, "--gpus", "0,1"]
+                       "--storage_root", args.storage_root, "--gpus", "0,1", "--execution_mode", "independent"]
             for _ in range(2):
                 result = subprocess.run(command, capture_output=True, text=True, check=True)
                 self.assertIn("No model loaded", result.stdout)
@@ -144,6 +145,180 @@ class VMTest(unittest.TestCase):
                 self.assertIn("--single_gpu", command)
                 self.assertNotIn("--no_verify_standard_generation", command)
                 self.assertNotIn("--no_validate_controls", command)
+
+    def test_model_parallel_is_one_worker_with_both_gpus_and_all_shards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = setup_selection(directory)
+            args.execution_mode = "model_parallel"
+            self.assertEqual(vm.execution_schedule(args, 65), {"model_parallel": list(range(13))})
+            plan = vm.build_plan(args)
+            args.execution_mode = "independent"
+            self.assertNotEqual(plan["pipeline_fingerprint"], vm.build_plan(args)["pipeline_fingerprint"])
+            args.execution_mode = "model_parallel"
+            calls = []
+            runner = SimpleNamespace(started=0, cancel=lambda: None, run=lambda *call: calls.append(call))
+            vm.run_shards(args, runner, Path(args.selection_dir, "preflight_case_manifest.jsonl"),
+                          lambda worker: vm.preflight_directory(args, worker) / "checkpoints",
+                          vm.execution_schedule(args, 2))
+            self.assertEqual(len(calls), 2)
+            self.assertEqual([call[0][call[0].index("--stage") + 1] for call in calls], ["capture", "patch"])
+            for command, _, gpu in calls:
+                self.assertEqual(gpu, "0,1")
+                self.assertIn("--model_parallel", command)
+                self.assertIn("--gpu_weight_budget_gib", command)
+                self.assertNotIn("--single_gpu", command)
+                self.assertNotIn("--no_validate_controls", command)
+            args.stage = "full"
+            calls.clear()
+            vm.run_shards(args, runner, Path(args.selection_dir, "analysis_case_manifest.jsonl"),
+                          lambda worker: Path(args.output_root, "primary/checkpoints"), {"model_parallel": [1]})
+            for command, _, _ in calls:
+                expected = command[command.index("--expected_gpu_hardware_path") + 1]
+                self.assertIn("preflight/model_parallel/checkpoints/shard_00/run_config.json", expected)
+
+    def test_model_parallel_plan_cli_never_initializes_cuda(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = setup_selection(directory)
+            command = [sys.executable, "scripts/run_phase3b_vm.py", "--stage", "plan",
+                       "--selection_dir", args.selection_dir, "--rescue_pool_root", args.rescue_pool_root,
+                       "--output_root", args.output_root, "--project_root", args.project_root,
+                       "--storage_root", args.storage_root]
+            result = subprocess.run(command, capture_output=True, text=True, check=True)
+            self.assertIn("No model loaded", result.stdout)
+            config = json.loads(Path(args.output_root, "vm_run_config.json").read_text())
+            self.assertEqual(config["execution_mode"], "model_parallel")
+            self.assertEqual(config["schedule"], {"model_parallel": list(range(10))})
+
+    def test_model_parallel_guard_and_weight_budget(self):
+        cuda = run_phase3b_patching.torch.cuda
+        model = SimpleNamespace(hf_device_map={"model.layers.0": 0, "model.layers.20": 1},
+                                parameters=lambda: [SimpleNamespace(device="cuda:0"), SimpleNamespace(device="cuda:1")])
+        with patch.object(cuda, "is_available", return_value=True), patch.object(cuda, "device_count", return_value=2), patch.object(cuda, "get_device_properties", return_value=SimpleNamespace(total_memory=22 * 1024 ** 3)):
+            run_phase3b_patching.validate_model_parallel_model(model)
+            model.hf_device_map["model.layers.20"] = "cpu"
+            with self.assertRaisesRegex(RuntimeError, "offload"):
+                run_phase3b_patching.validate_model_parallel_model(model)
+            model.hf_device_map["model.layers.20"] = 1
+            model.parameters = lambda: [SimpleNamespace(device="cuda:0")]
+            with self.assertRaisesRegex(RuntimeError, "Both GPUs"):
+                run_phase3b_patching.validate_model_parallel_model(model)
+            with self.assertRaises(ValueError):
+                run_phase3b_patching.validate_model_parallel_model(weight_budget_gib=22)
+        with patch.object(cuda, "is_available", return_value=True), patch.object(cuda, "device_count", return_value=1):
+            with self.assertRaisesRegex(RuntimeError, "exactly two"):
+                run_phase3b_patching.validate_model_parallel_model()
+
+    def test_model_parallel_loader_preserves_precision_and_eager(self):
+        args = SimpleNamespace(model_parallel=True, gpu_weight_budget_gib=10, single_gpu=False,
+                               model_name="Qwen/Qwen3-VL-8B-Instruct", model_revision="pinned", attn_implementation="eager")
+        with patch.object(run_phase3b_patching, "validate_model_parallel_model") as validate, patch.object(run_phase3b_patching, "load_model", return_value=("model", "processor")) as load:
+            self.assertEqual(run_phase3b_patching.load_phase3b_model(args), ("model", "processor"))
+            self.assertEqual(validate.call_count, 2)
+            self.assertEqual(load.call_args.kwargs["max_memory"], {0: 10 * 1024 ** 3, 1: 10 * 1024 ** 3, "cpu": 0})
+            self.assertEqual(load.call_args.kwargs["device_map"], "balanced")
+            self.assertEqual(load.call_args.kwargs["attn_implementation"], "eager")
+            self.assertNotIn("load_in_4bit", load.call_args.kwargs)
+        from unittest.mock import MagicMock
+        auto_model, auto_processor = MagicMock(), MagicMock()
+        with patch.object(run_eval, "AutoModelForImageTextToText", auto_model), patch.object(run_eval, "AutoProcessor", auto_processor):
+            run_eval.load_model("checkpoint", device_map="balanced", max_memory={0: 10, 1: 10, "cpu": 0})
+            self.assertEqual(auto_model.from_pretrained.call_args.kwargs["dtype"], run_eval.torch.float16)
+            self.assertEqual(auto_model.from_pretrained.call_args.kwargs["device_map"], "balanced")
+            run_eval.load_model("checkpoint")
+            self.assertEqual(auto_model.from_pretrained.call_args.kwargs["device_map"], "auto")
+            self.assertNotIn("max_memory", auto_model.from_pretrained.call_args.kwargs)
+
+    def test_actual_placement_is_saved_and_must_match_preflight_and_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory, "run_config.json")
+            config.write_text('{"run_fingerprint": "unchanged"}')
+            model = SimpleNamespace(hf_device_map={"early": 0, "late": 1})
+            run_phase3b_patching.record_model_placement(config, model)
+            saved = json.loads(config.read_text())
+            self.assertEqual(saved["model_device_map"], {"early": "0", "late": "1"})
+            model.hf_device_map = {"early": 1, "late": 0}
+            with self.assertRaisesRegex(RuntimeError, "placement differs"):
+                run_phase3b_patching.record_model_placement(config, model)
+            self.assertEqual(json.loads(config.read_text()), saved)
+            fresh = Path(directory, "new_config.json")
+            fresh.write_text('{}')
+            with self.assertRaisesRegex(RuntimeError, "placement differs"):
+                run_phase3b_patching.record_model_placement(fresh, model, config)
+
+    def test_model_parallel_preflight_gate_does_not_accept_replica_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = setup_selection(directory)
+            args.execution_mode = "model_parallel"
+            plan = vm.build_plan(args)
+            root = Path(args.output_root)
+            root.mkdir()
+            vm.write_json(root / "vm_preflight_summary.json", {"complete": True, "gpus": args.gpus, "pipeline_fingerprint": plan["pipeline_fingerprint"]})
+            base = vm.preflight_directory(args, "model_parallel")
+            vm.write_json(base / "checkpoints/shard_00/activations/pair/low_boundary/index.json",
+                          {"decision": {"prediction": "A"}, "standard_parity": {"first_token_match": True, "logits_allclose": True}})
+            vm.write_json(base / "analysis/aggregate_summary.json", {})
+            vm.write_json(root / "relocation_control/relocation_summary.json", {})
+            vm.require_vm_preflight(args, plan)
+            args.execution_mode = "independent"
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
+                vm.require_vm_preflight(args, vm.build_plan(args))
+
+    def test_preflight_model_parallel_orchestration_including_relocation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = setup_selection(directory)
+            calls = []
+            def run(command, label, gpu=None):
+                calls.append((command, label, gpu))
+                output = Path(command[command.index("--output_dir") + 1])
+                if "scripts/run_phase3b_patching.py" in command:
+                    for pair_id, pair in vm.manifest_pairs(Path(args.selection_dir, "preflight_case_manifest.jsonl")).items():
+                        for condition in pair:
+                            vm.write_json(output / "shard_00/activations" / pair_id / condition / "index.json",
+                                          {"decision": {"prediction": "A", "margin": 1},
+                                           "standard_parity": {"first_token_match": True, "logits_allclose": True}})
+                elif "scripts/analyze_phase3b.py" in command:
+                    vm.write_json(output / "aggregate_summary.json", dict.fromkeys((
+                        "missing_patch_count", "missing_capture_count", "missing_divergence_count", "missing_technical_control_count",
+                    ), 0))
+                else:
+                    self.assertIn("scripts/run_phase3b_relocation_control.py", command)
+                    self.assertIn("--expected_gpu_hardware_path", command)
+                    vm.write_json(output / "relocation_summary.json", {})
+            runner = SimpleNamespace(started=vm.time.perf_counter(), cancel=lambda: None, run=run)
+            argv = ["runner", "--stage", "preflight", "--selection_dir", args.selection_dir,
+                    "--rescue_pool_root", args.rescue_pool_root, "--output_root", args.output_root,
+                    "--storage_root", args.storage_root, "--project_root", args.project_root]
+            with patch.object(vm.sys, "argv", argv), patch.object(vm, "LoggedRunner", return_value=runner):
+                vm.main()
+            self.assertEqual(len(calls), 4)
+            self.assertEqual([call[2] for call in calls], ["0,1", "0,1", None, "0,1"])
+            summary = json.loads(Path(args.output_root, "vm_preflight_summary.json").read_text())
+            self.assertTrue(summary["complete"])
+            self.assertEqual(summary["execution_mode"], "model_parallel")
+            self.assertIsNone(summary["cross_gpu_margin_differences"])
+            self.assertEqual(len(summary["capture_audits"]["model_parallel"]), 4)
+
+    def test_hardware_gate_rejects_changed_weight_budget_before_loading(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = SimpleNamespace(expected_gpu_hardware_path=str(Path(directory, "config.json")),
+                                   model_parallel=True, single_gpu=False, gpu_weight_budget_gib=10)
+            vm.write_json(args.expected_gpu_hardware_path, {"gpu_hardware": {"devices": 2}, "single_gpu": False,
+                                                           **run_phase3b_patching.model_placement_settings(args)})
+            with patch.object(run_phase3b_patching, "gpu_hardware_metadata", return_value={"devices": 2}):
+                run_phase3b_patching.validate_preflight_hardware(args)
+                args.gpu_weight_budget_gib = 9
+                with self.assertRaisesRegex(RuntimeError, "settings differ"):
+                    run_phase3b_patching.validate_preflight_hardware(args)
+
+    def test_cpu_merge_rejects_different_actual_model_placement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for index, device in enumerate(("0", "1")):
+                vm.write_json(Path(directory, f"shard_{index:02d}/run_config.json"), {
+                    "run_fingerprint": str(index), "model_parallel": True,
+                    "model_device_map": {"model.layers.0": device}, "shard_index": index, "pair_ids": [str(index)],
+                })
+            with self.assertRaisesRegex(ValueError, "incompatible"):
+                analyze_phase3b.read_shards(directory)
 
     def test_logged_worker_surfaces_real_error_and_checkpoints_survive(self):
         with tempfile.TemporaryDirectory() as directory:
