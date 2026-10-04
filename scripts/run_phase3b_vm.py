@@ -143,6 +143,9 @@ def build_plan(args):
             path = resolve_video_path(row["video_path"], args.project_root, path_map)
             video_paths[row["eval_id"]] = str(path)
             video_hashes[str(path)] = video_hashes.get(str(path)) or digest(path)
+    weight_budget = float(args.gpu_weight_budget_gib)
+    if weight_budget.is_integer():
+        weight_budget = int(weight_budget)
     payload = {
         "schema": "phase3b_vm_execution_v1", "artifact_type": "real",
         "selection_dir": str(selection), "path_map": path_map,
@@ -164,7 +167,7 @@ def build_plan(args):
         "video_sha256": video_hashes, "video_paths_by_eval_id": video_paths,
         "pair_count": len(pairs["full"]), "primary_count": 50,
         "execution_mode": args.execution_mode,
-        "gpu_weight_budget_gib": args.gpu_weight_budget_gib if args.execution_mode == "model_parallel" else None,
+        "gpu_weight_budget_gib": weight_budget if args.execution_mode == "model_parallel" else None,
         "gpus": args.gpus,
         "reuse_source_config_sha256": digest(Path(args.reuse_completed_from) / "vm_run_config.json") if getattr(args, "reuse_completed_from", None) else None,
         "reuse_source_root": str(Path(args.reuse_completed_from).resolve()) if getattr(args, "reuse_completed_from", None) else None,

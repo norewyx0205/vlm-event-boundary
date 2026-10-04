@@ -108,6 +108,21 @@ class VMTest(unittest.TestCase):
             self.assertEqual(config["schedule"]["0"], [0, 2, 4, 6, 8])
             self.assertFalse(Path(args.output_root, "logs").exists())
 
+    def test_budget_fingerprint_is_numeric_not_int_vs_float_serialization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = setup_selection(directory)
+            args.execution_mode = "model_parallel"
+            args.gpu_weight_budget_gib = 10
+            default = vm.build_plan(args)
+            args.gpu_weight_budget_gib = 10.0
+            explicit = vm.build_plan(args)
+            self.assertEqual(default["pipeline_fingerprint"], explicit["pipeline_fingerprint"])
+            self.assertIsInstance(explicit["gpu_weight_budget_gib"], int)
+            args.gpu_weight_budget_gib = 10.5
+            changed = vm.build_plan(args)
+            self.assertNotEqual(default["pipeline_fingerprint"], changed["pipeline_fingerprint"])
+            self.assertEqual(changed["gpu_weight_budget_gib"], 10.5)
+
     def test_provenance_rejects_changed_videos_without_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             args = setup_selection(directory)

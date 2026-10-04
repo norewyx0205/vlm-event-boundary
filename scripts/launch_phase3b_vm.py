@@ -10,12 +10,12 @@ import sys
 from pathlib import Path
 
 try:
-    from .run_phase3b_unattended import add_job_arguments, lifecycle_directory, validate_job_args
+    from .run_phase3b_unattended import add_job_arguments, lifecycle_directory, validate_job_args, vm_command
     from .run_phase3b_vm import write_json
     from .surf_workspace import SurfClient, load_private_config
     from .phase3b_email import EmailNotifier, load_private_config as load_email_config
 except ImportError:
-    from run_phase3b_unattended import add_job_arguments, lifecycle_directory, validate_job_args
+    from run_phase3b_unattended import add_job_arguments, lifecycle_directory, validate_job_args, vm_command
     from run_phase3b_vm import write_json
     from surf_workspace import SurfClient, load_private_config
     from phase3b_email import EmailNotifier, load_private_config as load_email_config
@@ -31,6 +31,13 @@ def launch_command(args):
     if args.email_notify:
         command.extend(["--email_notify", "--email_config", args.email_config])
     return command + ["--", *args.runner_args]
+
+
+def plan_command(args):
+    command = vm_command(args)
+    command[2] = str(Path(args.project_root, "scripts/run_phase3b_vm.py"))
+    command[command.index("--stage") + 1] = "plan"
+    return command
 
 
 def main():
@@ -50,6 +57,8 @@ def main():
         parser.error("Install tmux on the VM first (sudo apt install tmux), then rerun this launcher.")
     if subprocess.run(["tmux", "has-session", "-t", "=" + args.session_name], capture_output=True).returncode == 0:
         parser.error("This tmux session already exists. Attach to it; do not start a duplicate experiment.")
+    # Reject changed inputs before starting a lifecycle that could email or pause the VM.
+    subprocess.run(plan_command(args), cwd=args.project_root, check=True)
     if args.pause_policy != "off":
         SurfClient(load_private_config(args.surf_config, (
             args.project_root, args.output_root, args.backup_dir, directory,

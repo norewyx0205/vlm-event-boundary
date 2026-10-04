@@ -372,10 +372,11 @@ class UnattendedTest(unittest.TestCase):
             argv = ["launch", "--output_root", args.output_root, "--storage_root", args.storage_root,
                     "--backup_dir", args.backup_dir, "--", "--gpus", "0,1"]
             with patch.object(sys, "argv", argv), patch.object(launch.shutil, "which", return_value="/usr/bin/tmux"), \
-                    patch.object(launch.subprocess, "run", side_effect=[SimpleNamespace(returncode=1), SimpleNamespace(returncode=0)]) as tmux, \
+                    patch.object(launch.subprocess, "run", side_effect=[SimpleNamespace(returncode=1), SimpleNamespace(returncode=0), SimpleNamespace(returncode=0)]) as tmux, \
                     contextlib.redirect_stdout(io.StringIO()):
                 launch.main()
-            command = tmux.call_args_list[1].args[0]
+            self.assertEqual(tmux.call_args_list[1].args[0][4], "plan")
+            command = tmux.call_args_list[2].args[0]
             self.assertEqual(command[:3], ["tmux", "new-session", "-d"])
             self.assertIn(sys.executable, command[-1])
             self.assertIn("--gpus 0,1", command[-1])
@@ -403,8 +404,26 @@ class UnattendedTest(unittest.TestCase):
                     patch.object(launch, "EmailNotifier", return_value=notifier):
                 with self.assertRaises(RuntimeError):
                     launch.main()
-            self.assertEqual(tmux.call_count, 1)
+            self.assertEqual(tmux.call_count, 2)
             self.assertFalse(job.lifecycle_directory(args).exists())
+
+    def test_launcher_plan_failure_cannot_start_job_email_or_pause(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = arguments(directory)
+            argv = ["launch", "--output_root", args.output_root, "--storage_root", args.storage_root,
+                    "--backup_dir", args.backup_dir, "--pause_policy", "finished", "--confirm_exclusive_workspace",
+                    "--email_notify", "--email_config", args.email_config, "--", *args.runner_args]
+            failure = subprocess.CalledProcessError(1, ["cpu-plan"])
+            with patch.object(sys, "argv", argv), patch.object(launch.shutil, "which", return_value="/usr/bin/tmux"), \
+                    patch.object(launch.subprocess, "run", side_effect=[SimpleNamespace(returncode=1), failure]) as call, \
+                    patch.object(launch, "SurfClient") as surf_client, patch.object(launch, "EmailNotifier") as notifier:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    launch.main()
+                self.assertEqual(call.call_count, 2)
+                self.assertEqual(call.call_args_list[1].args[0], launch.plan_command(args))
+                surf_client.assert_not_called()
+                notifier.assert_not_called()
+                self.assertFalse(job.lifecycle_directory(args).exists())
 
     def test_notebook_background_command_keeps_wrapper_arguments_separate(self):
         notebook = json.loads(Path("notebooks/phase3b_vm.ipynb").read_text())
