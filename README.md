@@ -1529,3 +1529,74 @@ This is best-effort notification while the wrapper is alive: a forcibly powered
 off VM, `kill -9`, an SMTP outage, blocked delivery or full disk can prevent an
 email. The lifecycle journal remains the local source of completion status.
 Automatic notification does not replace downloading and verifying a local backup.
+
+### VM Cohort Baseline Gate and Prospective Replacement
+
+`run_phase3b_vm.py --stage full` now audits **every low/temporal pair before any
+full-run patch**, not just the two preflight cases. `--stage baseline` runs this
+gate alone. It uses the same FP16 model placement, 36 capture hooks and standard
+first-token checks as capture. Exact-zero/non-finite A/B margins, non-A/B first
+tokens, changed archived predictions/categories, missing processor metadata,
+mapping differences and failed standard-generation parity block patching.
+Mirrored prompts retain their own archived pair category. Row checkpoints bind
+the cohort, video hashes, numerical/preprocessing runtime, hardware and code;
+an incompatible resume is refused. Successful gate output does not start full.
+
+The failed `run_v2_mp` remains immutable pilot evidence. Its complete baseline
+audit found three invalid primary pairs: 060 and 320 no longer reproduce the
+archived temporal rescue, and 275 has an exact-zero temporal A/B margin. Do not
+weaken these checks or silently drop the cases. The replacement protocol:
+
+- Keep the 47 valid primary bases, all controls, preflight and representatives.
+- Start after the last screened pool base (446 for this pool); never re-evaluate
+  the first 445 bases. Generate a separate supplemental pool in fixed five-base
+  batches with unchanged stimulus parameters and generator hashes.
+- Evaluate both conditions and both prompts; require strict margin/parity and
+  processor-only mapping eligibility before freezing. Select ascending base IDs,
+  at most once per base, preferring original only if both prompts are eligible.
+- Stop after three eligible independent replacements, with a default limit of
+  50 additional bases. Budget exhaustion saves progress but does not fabricate
+  a 50-case cohort or automatically extend screening. No patch effects enter
+  selection. This is an explicit VM-eligibility amendment, not a random sample.
+
+Run in the pinned VM environment with both GPUs visible and persistent caches:
+
+```bash
+python scripts/repair_phase3b_cohort.py \
+  --source_run_root /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v2_mp \
+  --diagnostic_dir /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v2_mp_diagnostics/baseline_audit_20261004_v2 \
+  --rescue_pool_root /data/yuxuanstorage/vlm_phase3b/rescue_pool \
+  --output_dir /data/yuxuanstorage/vlm_phase3b/analysis/vm_baseline_supplement_v1 \
+  --selection_dir /data/yuxuanstorage/vlm_phase3b/analysis/selection_v3_vm_verified
+```
+
+Add `--plan_only` for a CPU-only evidence/protocol check. Identical resumes reuse
+saved per-row screening; changed code, runtime, batch annotations or video bytes
+are rejected. The new selection saves exclusion/replacement evidence, every
+screened prompt-pair outcome, mapping audit and the frozen protocol.
+
+Use a **new** output root for the amended cohort:
+
+```bash
+python scripts/run_phase3b_vm.py --stage baseline \
+  --selection_dir /data/yuxuanstorage/vlm_phase3b/analysis/selection_v3_vm_verified \
+  --rescue_pool_root /data/yuxuanstorage/vlm_phase3b/rescue_pool \
+  --output_root /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v3_vm_verified \
+  --reuse_completed_from /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v2_mp \
+  --gpus 0,1
+```
+
+Reuse verifies identical measurement code, settings, annotations, mappings,
+video bytes, complete patch/control coverage and all 36 activation files.
+Only complete shards whose pair IDs still occupy the same shard are copied;
+partial shards remain solely in the old run. Original fingerprints are **never
+rewritten**. An explicit checksummed certificate allows the CPU merge to combine
+these old shards with the amended run. An unchanged A10 preflight/relocation
+control can also be certified, but the fresh cohort baseline must pass, including
+exact agreement with the reusable captures' decision records. Full backups
+include the copied old activations, certificate and provenance, not dangling
+references to the old run.
+
+Inspect `baseline_audit/summary.json` and `checkpoint_reuse.json` before explicitly
+starting full with the same arguments. The tmux/email/Pause wrapper also accepts
+`--stage baseline`; `full` automatically revalidates/reuses the baseline gate.

@@ -166,6 +166,11 @@ def build_plan(args):
         "execution_mode": args.execution_mode,
         "gpu_weight_budget_gib": args.gpu_weight_budget_gib if args.execution_mode == "model_parallel" else None,
         "gpus": args.gpus,
+        "reuse_source_config_sha256": digest(Path(args.reuse_completed_from) / "vm_run_config.json") if getattr(args, "reuse_completed_from", None) else None,
+        "reuse_source_root": str(Path(args.reuse_completed_from).resolve()) if getattr(args, "reuse_completed_from", None) else None,
+        "baseline_gate_code_sha256": {name: digest(Path(__file__).parent / name) for name in (
+            "phase3b_baseline.py", "run_phase3b_baseline.py", "phase3b_checkpoint_reuse.py",
+        )},
     }
     fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     return {**payload, "pipeline_fingerprint": fingerprint,
@@ -266,8 +271,18 @@ def model_options(args):
 
 
 def run_shards(args, runner, manifest, checkpoint, assignments):
+    certificate = None
+    if args.stage == "full":
+        try:
+            from .phase3b_checkpoint_reuse import validate_reuse
+        except ImportError:
+            from phase3b_checkpoint_reuse import validate_reuse
+        certificate = validate_reuse(args.output_root, manifest=manifest)
     def worker(gpu, shards):
         for shard in shards:
+            if certificate and f"shard_{shard:02d}" in certificate["shards"]:
+                print(f"REUSE shard {shard:02d}: certified complete capture/patch; no GPU forwards.", flush=True)
+                continue
             for stage in ("capture", "patch"):
                 hardware_options = []
                 if args.stage == "full":
@@ -296,8 +311,10 @@ def run_shards(args, runner, manifest, checkpoint, assignments):
 
 
 def analyze(runner, manifest, checkpoint, output):
+    certificate = Path(runner.args.output_root) / "checkpoint_reuse.json" if hasattr(runner, "args") else None
+    reuse_options = ["--reuse_certificate", str(certificate)] if certificate and certificate.is_file() and "primary" in checkpoint.parts else []
     runner.run([sys.executable, "-u", "scripts/analyze_phase3b.py", "--manifest_path", str(manifest),
-                "--shards_root", str(checkpoint), "--output_dir", str(output)], f"cpu_{output.name}")
+                "--shards_root", str(checkpoint), "--output_dir", str(output), *reuse_options], f"cpu_{output.name}")
     summary = json.loads((output / "aggregate_summary.json").read_text(encoding="utf-8"))
     if any(summary.get(key, 1) for key in (
         "missing_patch_count", "missing_capture_count", "missing_divergence_count", "missing_technical_control_count",
@@ -322,6 +339,17 @@ def capture_audit(checkpoint):
 
 
 def require_vm_preflight(args, plan):
+    try:
+        from .phase3b_checkpoint_reuse import validate_reuse
+    except ImportError:
+        from phase3b_checkpoint_reuse import validate_reuse
+    certificate = validate_reuse(args.output_root, plan)
+    if certificate and certificate["preflight_reused"]:
+        saved = json.loads((Path(args.output_root) / "reuse_source/vm_preflight_summary.json").read_text())
+        if not saved.get("complete") or saved["pipeline_fingerprint"] != certificate["source_pipeline_fingerprint"]:
+            raise RuntimeError("Certified source VM preflight is incomplete.")
+        capture_audit(preflight_directory(args, "model_parallel") / "checkpoints")
+        return
     path = Path(args.output_root) / "vm_preflight_summary.json"
     if not path.is_file():
         raise RuntimeError("Run --stage preflight on the A10 VM first; Colab A100 preflight does not satisfy the VM gate.")
@@ -339,7 +367,7 @@ def require_vm_preflight(args, plan):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=("plan", "preflight", "full", "analyze"), default="plan")
+    parser.add_argument("--stage", choices=("plan", "preflight", "baseline", "full", "analyze"), default="plan")
     parser.add_argument("--selection_dir", required=True)
     parser.add_argument("--rescue_pool_root", required=True)
     parser.add_argument("--output_root", required=True)
@@ -359,6 +387,7 @@ def main():
     parser.add_argument("--video_fps", type=float, default=None)
     parser.add_argument("--video_num_frames", type=int, default=None)
     parser.add_argument("--video_max_pixels", type=int, default=None)
+    parser.add_argument("--reuse_completed_from", help="Explicit immutable source VM run; only identical complete shards are reused.")
     args = parser.parse_args()
     args.gpus = parse_gpus(args.gpus)
     if args.execution_mode == "model_parallel" and (len(args.gpus) != 2 or not math.isfinite(args.gpu_weight_budget_gib) or args.gpu_weight_budget_gib <= 0):
@@ -382,7 +411,25 @@ def main():
         root = Path(args.output_root)
         manifest = Path(args.selection_dir) / "analysis_case_manifest.jsonl"
         try:
+            if args.reuse_completed_from:
+                try:
+                    from .phase3b_checkpoint_reuse import prepare_reuse, validate_reuse
+                except ImportError:
+                    from phase3b_checkpoint_reuse import prepare_reuse, validate_reuse
+                if (root / "checkpoint_reuse.json").is_file():
+                    validate_reuse(root, plan)
+                else:
+                    with run_lock(args.reuse_completed_from):
+                        prepare_reuse(args, plan)
             if args.stage == "preflight":
+                if (root / "checkpoint_reuse.json").is_file():
+                    require_vm_preflight(args, plan)
+                    write_json(root / "vm_last_status.json", {
+                        "stage": "preflight", "complete": True, "reused": True,
+                        "elapsed_sec": time.perf_counter() - runner.started,
+                    })
+                    print("Certified unchanged VM preflight reused. Next: --stage baseline; full not started.")
+                    return
                 manifest = Path(args.selection_dir) / "preflight_case_manifest.jsonl"
                 workers = list(execution_schedule(args, 2))
                 run_shards(args, runner, manifest, lambda gpu: preflight_directory(args, gpu) / "checkpoints", {gpu: [0] for gpu in workers})
@@ -408,11 +455,23 @@ def main():
                     "interpretation": "Technical gate passed; inspect relocation effects before full run.",
                 })
             else:
-                if args.stage == "full":
+                if args.stage in ("baseline", "full"):
                     require_vm_preflight(args, plan)
-                    run_shards(args, runner, manifest, lambda gpu: root / "primary/checkpoints", plan["schedule"])
-                analyze(runner, manifest, root / "primary/checkpoints", root / "primary/analysis")
-                write_json(root / "primary/capture_parity_audit.json", capture_audit(root / "primary/checkpoints"))
+                    try:
+                        from .run_phase3b_baseline import require_gate
+                    except ImportError:
+                        from run_phase3b_baseline import require_gate
+                    worker = list(execution_schedule(args, 2))[0]
+                    runner.run([sys.executable, "-u", "scripts/run_phase3b_baseline.py",
+                                "--run_root", str(root), "--hardware_config",
+                                str(preflight_directory(args, worker) / "checkpoints/shard_00/run_config.json")],
+                               "cohort_baseline_gate", visible_devices(args, worker))
+                    require_gate(root, plan)
+                    if args.stage == "full":
+                        run_shards(args, runner, manifest, lambda gpu: root / "primary/checkpoints", plan["schedule"])
+                if args.stage != "baseline":
+                    analyze(runner, manifest, root / "primary/checkpoints", root / "primary/analysis")
+                    write_json(root / "primary/capture_parity_audit.json", capture_audit(root / "primary/checkpoints"))
         except BaseException:
             runner.cancel()
             write_json(root / "vm_last_status.json", {"stage": args.stage, "complete": False, "elapsed_sec": time.perf_counter() - runner.started})

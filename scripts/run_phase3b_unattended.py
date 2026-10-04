@@ -30,7 +30,7 @@ except ImportError:
 
 
 def add_job_arguments(parser):
-    parser.add_argument("--stage", choices=("preflight", "full", "analyze"), default="full")
+    parser.add_argument("--stage", choices=("preflight", "baseline", "full", "analyze"), default="full")
     parser.add_argument("--output_root", required=True)
     parser.add_argument("--storage_root", default="/data/yuxuanstorage")
     parser.add_argument("--project_root", default=str(PROJECT_ROOT))
@@ -103,7 +103,7 @@ def assert_quiescent():
     if gpu.stdout.strip():
         raise RuntimeError("GPU compute processes still exist; automatic Pause is blocked.")
     processes = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=30, check=True)
-    active = re.compile(r"(?:^|[ /])(?:run_phase3b_vm|run_phase3b_patching|run_phase3b_relocation_control|run_phase3b_screening|run_eval|probe_attention_roi)\.py(?:\s|$)")
+    active = re.compile(r"(?:^|[ /])(?:run_phase3b_vm|run_phase3b_patching|run_phase3b_baseline|repair_phase3b_cohort|run_phase3b_relocation_control|run_phase3b_screening|run_eval|probe_attention_roi)\.py(?:\s|$)")
     if any(active.search(line) for line in processes.stdout.splitlines()):
         raise RuntimeError("Another research runner is active; automatic Pause is blocked.")
 

@@ -17,6 +17,12 @@ except ImportError:
 
 def backup_files(root, reports_only):
     root = Path(root).resolve()
+    if (root / "checkpoint_reuse.json").is_file():
+        try:
+            from .phase3b_checkpoint_reuse import validate_reuse
+        except ImportError:
+            from phase3b_checkpoint_reuse import validate_reuse
+        validate_reuse(root)
     files = {}
     for path in sorted(root.rglob("*")):
         if path.name == ".pipeline.lock" or path.suffix == ".tmp":

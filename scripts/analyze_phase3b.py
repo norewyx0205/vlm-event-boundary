@@ -28,7 +28,7 @@ ROLES = (
 )
 
 
-def read_shards(root):
+def read_shards(root, reuse=None):
     root = Path(root)
     divergence, patches, captures, configs, technical_controls = [], [], {}, [], {}
     for shard in sorted(root.glob("shard_*")):
@@ -74,7 +74,8 @@ def read_shards(root):
         "model_parallel", "model_device_map_strategy", "gpu_weight_budget_gib", "model_device_map",
     )
     for config in configs[1:]:
-        if any(config.get(key) != configs[0].get(key) for key in shared):
+        allowed_changes = {"repo_commit", "manifest_sha256", "mapping_sha256"} if reuse else set()
+        if any(config.get(key) != configs[0].get(key) for key in shared if key not in allowed_changes):
             raise ValueError("Phase 3B shards have incompatible model/processor settings.")
     shard_indices = [config["shard_index"] for config in configs]
     if len(shard_indices) != len(set(shard_indices)):
@@ -350,10 +351,19 @@ def main():
     parser.add_argument("--allow_incomplete", action="store_true")
     parser.add_argument("--no_plots", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--reuse_certificate", help="Explicit amended-cohort certificate; old fingerprints remain intact.")
     args = parser.parse_args()
-    divergence, patches, captures, configs, technical_controls = read_shards(args.shards_root)
+    reuse = None
+    if args.reuse_certificate:
+        from phase3b_checkpoint_reuse import validate_reuse
+        certificate = Path(args.reuse_certificate).resolve()
+        if certificate.name != "checkpoint_reuse.json" or Path(args.shards_root).resolve() != certificate.parent / "primary/checkpoints":
+            raise ValueError("Reuse certificate must belong to this run's checkpoint directory.")
+        reuse = validate_reuse(certificate.parent, manifest=args.manifest_path)
+    divergence, patches, captures, configs, technical_controls = read_shards(args.shards_root, reuse)
     digest = hashlib.sha256(Path(args.manifest_path).read_bytes()).hexdigest()
-    if any(config["manifest_sha256"] != digest for config in configs):
+    old_fingerprints = {item["run_fingerprint"] for item in reuse["shards"].values()} if reuse else set()
+    if any(config["manifest_sha256"] != digest and config["run_fingerprint"] not in old_fingerprints for config in configs):
         raise ValueError("Frozen manifest content differs from shard provenance.")
     manifest_rows = read_jsonl(args.manifest_path)
     manifest_pairs = {row["phase3b_pair_id"] for row in manifest_rows}
@@ -416,6 +426,7 @@ def main():
         "first_missing_patches": missing[:20],
         "representative_pairs": representatives,
         "shard_fingerprints": [config["run_fingerprint"] for config in configs],
+        "checkpoint_reuse": {"source_pipeline_fingerprint": reuse["source_pipeline_fingerprint"], "reused_shards": sorted(reuse["shards"])} if reuse else None,
         "mean_case_spearman_cosine": float(np.mean(valid_correlations)) if valid_correlations else None,
     }
     atomic_write_json(output / "aggregate_summary.json", summary)
