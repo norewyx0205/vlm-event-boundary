@@ -1435,6 +1435,7 @@ experiment exits -> persist return code/completion status and log snapshot
 -> full timestamped backup (including activations and frozen source videos)
 -> verify archive and file SHA-256 checksums
 -> confirm no remaining GPU processes or known research runners
+-> optional completion email (before Pause can disconnect the VM)
 -> request SURF Pause only if the explicit policy permits it
 ```
 
@@ -1471,3 +1472,60 @@ The API authentication and workspace actions follow the official
 [SURF API guide](https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/117178402/SRC%2BAPI)
 and [workspace OpenAPI schema](https://gw.live.surfresearchcloud.nl/v1/workspace/swagger/schema/).
 Session lifecycle follows the [tmux manual](https://man.openbsd.org/tmux.1).
+
+### Completion Email
+
+Email is optional and off by default. `--email_notify` on the detached launcher
+sends a short SUCCESS/FAILED completion summary after backup verification and
+**before** requesting Pause. It includes stage, exit code, elapsed time, frozen
+cohort size, completed analysis row counts, persistent log/status paths and
+verified backup path. A failed experiment does not reuse a previous analysis
+as its result. No activations, videos, log attachments or credentials are sent.
+
+The sender and recipient can differ: a Gmail sender can notify a university
+mailbox. Do not assume a university/Microsoft 365 mailbox accepts SMTP password
+authentication. This sender supports authenticated SMTP with provider-issued
+app passwords and certificate-verified TLS (`ssl` or `starttls`), not Microsoft
+OAuth. Gmail app passwords require an eligible account with 2-Step Verification;
+see [Google's app-password instructions](https://support.google.com/accounts/answer/185833).
+Use an app password, **never** your normal Gmail or university login password.
+
+In an interactive VM terminal with the experiment environment activated:
+
+```bash
+python scripts/phase3b_email.py setup \
+  --username YOUR_GMAIL_ADDRESS \
+  --to_addr y.wang60@students.uu.nl
+python scripts/phase3b_email.py test
+```
+
+The password is requested without echo; there is no password command-line
+argument. Setup authenticates without sending and refuses to overwrite an
+existing config. Defaults are `smtp.gmail.com`, SSL/TLS and port 465. Other
+providers can use `--smtp_host`, `--tls starttls`, `--port`, and `--from_addr`.
+Credentials stay in `/data/yuxuanstorage/.phase3b_private/email.json`, with
+file mode `600` and private directory mode `700`, outside Git, runs and backups.
+`--config_path` overrides the path for setup/check/test; `--email_config`
+overrides it for the launcher. Unsafe paths/permissions are rejected.
+
+`python scripts/phase3b_email.py check` only authenticates; `test` sends one test
+email to the configured recipient. Check inbox **and spam** for the test before
+leaving the full run unattended. SMTP acceptance is not proof of inbox delivery.
+After the test arrives, add `--email_notify` **before** `--` in the full-run
+launcher command above. In `phase3b_vm.ipynb`, instead set
+`PHASE3B_VM_EMAIL_NOTIFY = True`; email requires its background mode. An enabled
+sender is checked before starting GPU work, independently of the SURF API token.
+
+Backup/verification/idle-check failures trigger a NEEDS ATTENTION notification.
+If the Pause API fails after a completion email, a second notification reports
+the error. The pre-Pause email explicitly says that Pause/billing stop are not
+yet confirmed; check the portal and the persistent lifecycle journal. Mail
+errors/timeouts are recorded under `email_notifications` in `job_status.json`,
+with sanitized errors and no automatic retry, and do not block backup or Pause.
+Notification credentials are never forwarded to the scientific runner and do
+not affect its fingerprint or require another preflight.
+
+This is best-effort notification while the wrapper is alive: a forcibly powered
+off VM, `kill -9`, an SMTP outage, blocked delivery or full disk can prevent an
+email. The lifecycle journal remains the local source of completion status.
+Automatic notification does not replace downloading and verifying a local backup.

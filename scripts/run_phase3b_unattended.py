@@ -20,11 +20,13 @@ try:
     from .common import PROJECT_ROOT
     from .run_phase3b_vm import run_lock, write_json
     from .surf_workspace import DEFAULT_CONFIG, SurfClient, check_private_location, load_private_config
+    from .phase3b_email import DEFAULT_CONFIG as EMAIL_CONFIG, EmailNotifier, completion_message, load_private_config as load_email_config
 except ImportError:
     from backup_phase3b import create_backup, verify_backup
     from common import PROJECT_ROOT
     from run_phase3b_vm import run_lock, write_json
     from surf_workspace import DEFAULT_CONFIG, SurfClient, check_private_location, load_private_config
+    from phase3b_email import DEFAULT_CONFIG as EMAIL_CONFIG, EmailNotifier, completion_message, load_private_config as load_email_config
 
 
 def add_job_arguments(parser):
@@ -36,6 +38,8 @@ def add_job_arguments(parser):
     parser.add_argument("--pause_policy", choices=("off", "success", "finished"), default="off",
                         help="success: pause only after success; finished: also after failure. Both require a verified full backup.")
     parser.add_argument("--surf_config", default=DEFAULT_CONFIG)
+    parser.add_argument("--email_notify", action="store_true", help="Send a small completion/failure email before optional SURF Pause.")
+    parser.add_argument("--email_config", default=EMAIL_CONFIG)
     parser.add_argument("--confirm_exclusive_workspace", action="store_true",
                         help="Confirm this is the intended VM and no colleagues/other jobs need it to stay running.")
     parser.add_argument("runner_args", nargs=argparse.REMAINDER, help="Pass VM runner options after --.")
@@ -50,6 +54,8 @@ def validate_job_args(args):
     for name in ("output_root", "storage_root", "project_root", "backup_dir"):
         setattr(args, name, str(Path(getattr(args, name)).expanduser().resolve()))
     args.surf_config = str(Path(args.surf_config).expanduser().absolute())
+    args.email_notify = getattr(args, "email_notify", False)
+    args.email_config = str(Path(getattr(args, "email_config", EMAIL_CONFIG)).expanduser().absolute())
     for name in ("output_root", "backup_dir"):
         if not Path(getattr(args, name)).is_relative_to(args.storage_root):
             raise ValueError("Run artifacts and backups must be on persistent --storage_root.")
@@ -61,6 +67,8 @@ def validate_job_args(args):
         if not args.confirm_exclusive_workspace:
             raise ValueError("Automatic Pause requires --confirm_exclusive_workspace; it stops the whole VM, not just your GPU job.")
         check_private_location(args.surf_config, (args.project_root, args.output_root, args.backup_dir, lifecycle_directory(args)))
+    if args.email_notify:
+        check_private_location(args.email_config, (args.project_root, args.output_root, args.backup_dir, lifecycle_directory(args)))
     forwarded = args.runner_args[1:] if args.runner_args[:1] == ["--"] else args.runner_args
     reserved = {"--stage", "--output_root", "--storage_root", "--project_root"}
     if any(item.split("=", 1)[0] in reserved for item in forwarded):
@@ -119,7 +127,7 @@ def run_child(args):
             signal.signal(signum, handler)
 
 
-def execute_job(args, client=None, child=run_child, backup=create_backup, verify=verify_backup, idle_check=assert_quiescent):
+def execute_job(args, client=None, child=run_child, backup=create_backup, verify=verify_backup, idle_check=assert_quiescent, notifier=None):
     directory = lifecycle_directory(args)
     with lifecycle_lock(directory):
         # A running direct CLI/notebook invocation must not be adopted or duplicated.
@@ -131,6 +139,7 @@ def execute_job(args, client=None, child=run_child, backup=create_backup, verify
             "wrapper_code_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "state": "prechecking", "backup_verified": False, "local_backup_confirmed": False,
             "wrapper_pid": os.getpid(), "workspace": None,
+            "email_notifications_enabled": args.email_notify, "email_notifications": {},
         }
         started = time.perf_counter()
         path = directory / "job_status.json"
@@ -139,7 +148,28 @@ def execute_job(args, client=None, child=run_child, backup=create_backup, verify
             status.update(state=state, elapsed_sec=time.perf_counter() - started, **fields)
             write_json(path, status)
             print(f"[lifecycle] {state}; elapsed={status['elapsed_sec']/60:.1f} min; status={path}", flush=True)
+        def notify(event):
+            if not args.email_notify or event in status["email_notifications"]:
+                return
+            record = {"attempted_at": datetime.now(timezone.utc).isoformat(), "state": "attempting"}
+            status["email_notifications"][event] = record
+            write_json(path, status)
+            try:
+                if notifier is None:
+                    raise RuntimeError("Email sender was not configured.")
+                subject, body = completion_message(status, args.output_root, directory)
+                record.update(notifier.send(subject, body), state="smtp_accepted")
+            except Exception as exc:
+                # Notification failure must not block backup or Pause, or leak a provider response.
+                record.update(state="failed_or_unconfirmed", error_type=type(exc).__name__)
+            write_json(path, status)
+            print(f"[lifecycle] email {event}: {record['state']}; check inbox/spam and job_status.json", flush=True)
         try:
+            if args.email_notify:
+                notifier = notifier or EmailNotifier(load_email_config(args.email_config, (
+                    args.project_root, args.output_root, args.backup_dir, directory,
+                )))
+                notifier.check()
             if args.pause_policy != "off":
                 client = client or SurfClient(load_private_config(args.surf_config, (
                     args.project_root, args.output_root, args.backup_dir, directory,
@@ -171,10 +201,13 @@ def execute_job(args, client=None, child=run_child, backup=create_backup, verify
             eligible = args.pause_policy == "finished" or (args.pause_policy == "success" and success)
             if not eligible:
                 save("done_without_pause", pause_skipped_reason="disabled_or_experiment_failed")
+                notify("completion")
             else:
                 idle_check()
                 with run_lock(args.output_root):
                     save("pause_request_pending")
+                    # Pausing can disconnect the VM immediately; notify before the API action.
+                    notify("completion")
                     result = client.request_pause()
                     save("pause_requested", pause_result=result,
                          note="Verify paused in the SURF portal; request acceptance alone does not confirm billing has stopped.")
@@ -182,6 +215,7 @@ def execute_job(args, client=None, child=run_child, backup=create_backup, verify
         except Exception as exc:
             # Exceptions from API code are sanitized before reaching this public record.
             save("needs_attention", error=str(exc), pause_not_confirmed=True)
+            notify("attention")
             raise
 
 

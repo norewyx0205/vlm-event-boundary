@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, Mock, patch
 from urllib.error import HTTPError
 
 from scripts import surf_workspace as surf, run_phase3b_unattended as job, launch_phase3b_vm as launch
+from scripts import phase3b_email as mail
 from scripts.run_phase3b_vm import write_json
 
 WORKSPACE = "11111111-2222-4333-8444-555555555555"
@@ -33,6 +34,7 @@ def arguments(directory, policy="success"):
         stage="full", output_root=str(root / "run"), storage_root=str(root), project_root=str(Path.cwd()),
         backup_dir=str(root / "backups"), surf_config=str(root / "private/surf.json"),
         pause_policy=policy, confirm_exclusive_workspace=True,
+        email_notify=False, email_config=str(root / "private/email.json"),
         runner_args=["--", "--selection_dir", str(root / "selection"), "--rescue_pool_root", str(root / "pool")],
     ))
 
@@ -128,8 +130,9 @@ class SurfTest(unittest.TestCase):
 
 
 class UnattendedTest(unittest.TestCase):
-    def run_fixture(self, directory, *, return_code=0, policy="success", backup_error=None, busy_after=False):
+    def run_fixture(self, directory, *, return_code=0, policy="success", backup_error=None, busy_after=False, notifier=None):
         args = arguments(directory, policy)
+        args.email_notify = notifier is not None
         events = []
         client = Mock()
         client.check.return_value = {"id": WORKSPACE, "name": "Test VM", "status": "running", "pause_allowed": True}
@@ -153,7 +156,78 @@ class UnattendedTest(unittest.TestCase):
             events.append("idle")
             if busy_after and events.count("idle") > 1:
                 raise RuntimeError("another GPU job")
-        return args, events, client, lambda: job.execute_job(args, client, child, backup, verify, idle)
+        return args, events, client, lambda: job.execute_job(args, client, child, backup, verify, idle, notifier=notifier)
+
+    def test_email_is_sent_after_backup_before_pause_for_success_and_failure(self):
+        for return_code in (0, 1):
+            with self.subTest(return_code=return_code), tempfile.TemporaryDirectory() as directory:
+                notifier = Mock()
+                args, events, client, run = self.run_fixture(directory, return_code=return_code, policy="finished", notifier=notifier)
+                notifier.send.side_effect = lambda *_: events.append("email") or {"smtp_accepted": True, "inbox_delivery_confirmed": False}
+                self.assertEqual(run(), return_code)
+                self.assertEqual(events[-3:], ["idle", "email", "pause"])
+                self.assertLess(events.index("verify"), events.index("email"))
+                subject, body = notifier.send.call_args.args
+                self.assertIn("SUCCESS" if return_code == 0 else "FAILED", subject)
+                self.assertIn("NOT yet confirmed", body)
+                notifier.check.assert_called_once()
+                notifier.send.assert_called_once()
+
+    def test_email_failure_cannot_block_pause_or_publish_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifier = Mock()
+            notifier.send.side_effect = RuntimeError("secret SMTP credential")
+            args, events, client, run = self.run_fixture(directory, policy="finished", notifier=notifier)
+            self.assertEqual(run(), 0)
+            client.request_pause.assert_called_once()
+            record = (job.lifecycle_directory(args) / "job_status.json").read_text()
+            self.assertNotIn("secret SMTP credential", record)
+            self.assertEqual(json.loads(record)["email_notifications"]["completion"]["state"], "failed_or_unconfirmed")
+            notifier.send.assert_called_once()
+
+    def test_backup_and_pause_errors_send_attention_email_with_correct_state(self):
+        for failure in ("backup", "pause"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                notifier = Mock()
+                notifier.send.return_value = {"smtp_accepted": True}
+                args, events, client, run = self.run_fixture(directory, backup_error="disk full" if failure == "backup" else None,
+                                                             policy="finished", notifier=notifier)
+                if failure == "pause":
+                    client.request_pause.side_effect = RuntimeError("Pause timed out")
+                with self.assertRaises(RuntimeError):
+                    run()
+                self.assertEqual(notifier.send.call_count, 1 if failure == "backup" else 2)
+                subject, body = notifier.send.call_args.args
+                self.assertIn("NEEDS ATTENTION", subject)
+                self.assertIn("may still be running and charging", body)
+                record = json.loads((job.lifecycle_directory(args) / "job_status.json").read_text())
+                self.assertIn("attention", record["email_notifications"])
+
+    def test_email_without_pause_and_bad_authentication_fail_before_expensive_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            notifier = Mock()
+            notifier.send.return_value = {"smtp_accepted": True}
+            args, events, client, run = self.run_fixture(directory, policy="off", notifier=notifier)
+            self.assertEqual(run(), 0)
+            notifier.send.assert_called_once()
+            client.check.assert_not_called()
+            notifier.check.side_effect = RuntimeError("SMTP authentication failed")
+            events.clear()
+            with self.assertRaises(RuntimeError):
+                run()
+            self.assertNotIn("experiment", events)
+
+    def test_email_configuration_path_and_flags_stay_out_of_scientific_runner(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = arguments(directory, policy="off")
+            args.email_notify = True
+            command = launch.launch_command(args)
+            self.assertIn("--email_notify", command)
+            self.assertIn(args.email_config, command)
+            self.assertNotIn("--email_notify", job.vm_command(args))
+            args.email_config = str(Path(args.output_root, "email.json"))
+            with self.assertRaises(ValueError):
+                job.validate_job_args(args)
 
     def test_success_backups_then_verifies_then_pauses_without_claiming_local_backup(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -215,6 +289,11 @@ class UnattendedTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             args = arguments(directory, policy="off")
             surf.save_private_config(args.surf_config, config())
+            mail.save_private_config(args.email_config, {
+                "schema": "phase3b_email_private_v1", "smtp_host": "smtp.example.com", "port": 465,
+                "tls": "ssl", "username": "sender@example.com", "password": "private-test-smtp-password",
+                "from_addr": "sender@example.com", "to_addr": "recipient@example.org",
+            })
             def child(_args):
                 write_json(Path(args.output_root, "vm_run_config.json"), {"video_sha256": {}})
                 write_json(Path(args.output_root, "vm_last_status.json"), {"stage": "full", "complete": True})
@@ -226,6 +305,8 @@ class UnattendedTest(unittest.TestCase):
             self.assertIn("run/layer.pt", [entry["path"] for entry in manifest["files"]])
             self.assertIn("run/unattended_run_status.json", [entry["path"] for entry in manifest["files"]])
             self.assertNotIn(config()["token"], json.dumps(manifest))
+            self.assertFalse(any(entry["source_path"] in {args.surf_config, args.email_config} for entry in manifest["files"]))
+            self.assertNotIn("private-test-smtp-password", json.dumps(manifest))
             self.assertFalse(manifest["local_backup_confirmed"])
 
     def test_pause_failure_retains_verified_backup_and_pending_status(self):
@@ -308,6 +389,23 @@ class UnattendedTest(unittest.TestCase):
                     launch.main()
                 self.assertEqual(tmux.call_count, 1)
 
+    def test_launcher_email_precheck_can_stop_before_tmux_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = arguments(directory, policy="off")
+            argv = ["launch", "--output_root", args.output_root, "--storage_root", args.storage_root,
+                    "--backup_dir", args.backup_dir, "--email_notify", "--email_config", args.email_config,
+                    "--", "--gpus", "0,1"]
+            notifier = Mock()
+            notifier.check.side_effect = RuntimeError("SMTP authentication failed")
+            with patch.object(sys, "argv", argv), patch.object(launch.shutil, "which", return_value="/usr/bin/tmux"), \
+                    patch.object(launch.subprocess, "run", return_value=SimpleNamespace(returncode=1)) as tmux, \
+                    patch.object(launch, "load_email_config", return_value={}), \
+                    patch.object(launch, "EmailNotifier", return_value=notifier):
+                with self.assertRaises(RuntimeError):
+                    launch.main()
+            self.assertEqual(tmux.call_count, 1)
+            self.assertFalse(job.lifecycle_directory(args).exists())
+
     def test_notebook_background_command_keeps_wrapper_arguments_separate(self):
         notebook = json.loads(Path("notebooks/phase3b_vm.ipynb").read_text())
         with tempfile.TemporaryDirectory() as directory:
@@ -317,6 +415,7 @@ class UnattendedTest(unittest.TestCase):
                          "PHASE3B_VM_OUTPUT_ROOT": Path(args.output_root), "STORAGE_ROOT": Path(args.storage_root),
                          "PROJECT_ROOT": Path(args.project_root), "PHASE3B_VM_BACKUP_DIR": Path(args.backup_dir),
                          "PHASE3B_VM_SURF_CONFIG": Path(args.surf_config),
+                         "PHASE3B_VM_EMAIL_NOTIFY": True, "PHASE3B_VM_EMAIL_CONFIG": Path(args.email_config),
                          "vm_runner_options": args.runner_args, "subprocess": subprocess, "sys": sys}
             with patch.object(subprocess, "run") as call:
                 exec("".join(notebook["cells"][5]["source"]), namespace)
@@ -328,6 +427,16 @@ class UnattendedTest(unittest.TestCase):
             self.assertEqual(validated.stage, "full")
             self.assertEqual(validated.output_root, args.output_root)
             self.assertEqual(validated.runner_args, args.runner_args)
+            self.assertTrue(validated.email_notify)
+            self.assertEqual(validated.email_config, args.email_config)
+
+    def test_notebook_email_cannot_silently_run_without_lifecycle(self):
+        notebook = json.loads(Path("notebooks/phase3b_vm.ipynb").read_text())
+        namespace = {"PHASE3B_VM_STAGE": "full", "PHASE3B_VM_BACKGROUND": False,
+                     "PHASE3B_VM_EMAIL_NOTIFY": True, "subprocess": subprocess}
+        with patch.object(subprocess, "run") as call, self.assertRaisesRegex(ValueError, "email requires background"):
+            exec("".join(notebook["cells"][5]["source"]), namespace)
+        call.assert_not_called()
 
     def test_notebook_background_last_cell_never_packages_running_job(self):
         notebook = json.loads(Path("notebooks/phase3b_vm.ipynb").read_text())
