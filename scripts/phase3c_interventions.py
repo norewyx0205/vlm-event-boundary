@@ -161,7 +161,7 @@ def selected_state(states, layer, location, positions):
             "vectors": state["vectors"][[lookup[position] for position in positions]].clone()}
 
 
-def knockout_mask(mask, queries, keys, length, heads=32):
+def knockout_mask(mask, queries, keys, length, heads=32, apply=True):
     expected = edge_budget(queries, keys, length)
     if (not torch.is_tensor(mask) or mask.ndim != 4 or mask.shape[0] != 1 or
             mask.shape[1] not in (1, heads) or mask.shape[2:] != (length, length) or
@@ -178,8 +178,9 @@ def knockout_mask(mask, queries, keys, length, heads=32):
     expected_counts = torch.tensor(expected["visible_causal_edges_by_query"], device=mask.device)
     if not torch.equal(counts, expected_counts.unsqueeze(0).expand_as(counts)):
         raise ValueError("Actual masked-edge budget differs from the CPU audit.")
-    result = mask.clone()
-    result[:, :, q[:, None], k[None, :]] = float("-inf")
+    result = mask.clone() if apply else mask
+    if apply:
+        result[:, :, q[:, None], k[None, :]] = float("-inf")
     return result, expected
 
 
@@ -214,7 +215,7 @@ class AttentionKnockout:
                 if bound.arguments.get("past_key_values") is not None:
                     raise ValueError("Knockout forbids cached attention.")
                 mask = bound.arguments.get("attention_mask")
-                modified, budget = knockout_mask(mask, self.queries, self.keys, self.length, self.heads)
+                modified, budget = knockout_mask(mask, self.queries, self.keys, self.length, self.heads, apply=self.enabled)
                 if budget != self.budget:
                     raise RuntimeError("Knockout budget changed during execution.")
                 self.pending.add(layer)

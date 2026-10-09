@@ -7,8 +7,9 @@ pilot. CPU archive auditing, processor-only mapping/control auditing and cohort
 freeze tools are implemented. The implementation defaults below are explicit;
 the actual case IDs and configuration are frozen only after processor
 eligibility passes. The GPU baseline/technical-preflight entry point and reusable
-residual/mask interventions are implemented but not GPU-validated. The primary
-12-case intervention-grid runner and aggregate analysis are not yet implemented.
+residual/mask interventions, fixed primary grid and CPU aggregate analysis are
+implemented but not GPU-validated. No new intervention results are claimed by
+the implementation tests.
 This is a pre-specified follow-up protocol, not a retrospective
 preregistration of Phase 3B.
 
@@ -297,14 +298,14 @@ Example CPU-only preparation on the VM, from the repository root:
 ```bash
 python scripts/prepare_phase3c.py --stage audit \
   --source_run_root /data/yuxuanstorage/vlm_phase3b/a10_runs/run_v4_vm_verified \
-  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v2
+  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3
 
 python scripts/audit_phase3c_mappings.py \
-  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v2 \
+  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3 \
   --project_root /data/yuxuanstorage/vlm-event-boundary
 
 python scripts/prepare_phase3c.py --stage freeze \
-  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v2
+  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3
 ```
 
 The source videos must be present; source archive hashes do not replace the
@@ -366,13 +367,13 @@ Example explicit GPU stages, only after completing CPU eligibility and freeze:
 
 ```bash
 python -u scripts/run_phase3c_preflight.py --stage baseline \
-  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v2 \
-  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v2/execution_v1 \
+  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3 \
+  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3/execution_v1 \
   --gpus 0,1 --execution_mode model_parallel --gpu_weight_budget_gib 10
 
 python -u scripts/run_phase3c_preflight.py --stage preflight \
-  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v2 \
-  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v2/execution_v1 \
+  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3 \
+  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3/execution_v1 \
   --gpus 0,1 --execution_mode model_parallel --gpu_weight_budget_gib 10
 ```
 
@@ -392,8 +393,101 @@ windows/cases from it or treat the technical grid as the main pilot.
 These commands do not send email or request SURF Pause. They have not been
 launched on the VM as part of implementation. Preserve earlier preparation
 roots: the updated protocol/preparation hashes require a fresh plan root, hence
-`pilot_v2` above. The Phase 3B source remains read-only. A passed technical stage
+`pilot_v3` above. The Phase 3B source remains read-only. A passed technical stage
 does not mark the primary Phase 3C experiment complete.
+
+## Fixed Primary Grid and Analysis Implementation
+
+`scripts/run_phase3c.py` has three explicitly invoked stages: `patch`, `routing`
+and `knockout`. All require the complete 24-row GPU baseline and 152-task
+technical-preflight gates, independently rechecked before loading weights.
+`knockout` additionally requires the intact `routing` diagnostics. Patch and
+routing may be run independently; neither inspects effects to choose cases,
+layers or windows. No stage automatically launches another stage.
+
+- `patch`: 696 forwards. For each of 12 cases and both recipient conditions,
+  replace each single-ROI reference, expanded both-target support and whole
+  Event-2 grid at layers `0,4,8,12,16,20`. Whole-grid timing controls also cover
+  pre/post-DeepStack at layers `0,1,2`. The layer-0 pre-addition whole-grid task
+  serves both comparisons and is computed once, not duplicated. This is 29
+  unique interventions per condition. Only observed, location-matched donor
+  vectors are used; reference coverage and expanded full coverage remain
+  distinct in results.
+- `routing`: 24 intact forwards, one per case/condition. Observe all 36 layers
+  for each of the 12 query/key/control routes without changing the mask or
+  logits. Save selected-edge attention mass averaged over query rows and heads
+  per layer. Exact logits parity with the GPU baseline is mandatory. This is a
+  descriptive diagnostic, never a primary intervention effect estimate.
+- `knockout`: 2,592 forwards: 12 cases x 2 conditions x 2 text-query groups x
+  3 target-key groups x 9 four-layer windows x 2 target/background settings.
+  Every background control retains its exact frozen per-bin key and visible
+  causal-edge budget. Optional distractor availability is recorded by the CPU
+  audit but is not added to this primary grid. No missing control shrinks the
+  required grid silently.
+
+Each completed primary task is atomically saved under
+`<stage>/task_checkpoints/<task_id>.json`. Resume validates its fingerprint,
+specification, input tensor hashes and actual frozen donor/recipient positions.
+These files are authoritative even after interruption before `rows.jsonl`
+consolidation. A completed stage rebuilds and verifies consolidated rows and
+summary checksums; CPU analysis requires exact agreement with the per-task
+files. Stored failures block additional work unless `--retry_failed` is explicit;
+the error history is retained. `--max_tasks` limits new tasks, not the cohort,
+and an incomplete stage exits nonzero. A fully completed requested stage is
+verified and reused without loading model weights again.
+
+Example commands, only after the baseline and technical preflight above pass:
+
+```bash
+python -u scripts/run_phase3c.py --stage patch \
+  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3 \
+  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3/execution_v1 \
+  --gpus 0,1 --execution_mode model_parallel --gpu_weight_budget_gib 10
+
+python -u scripts/run_phase3c.py --stage routing \
+  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3 \
+  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3/execution_v1 \
+  --gpus 0,1 --execution_mode model_parallel --gpu_weight_budget_gib 10
+
+python -u scripts/run_phase3c.py --stage knockout \
+  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3 \
+  --output_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3/execution_v1 \
+  --gpus 0,1 --execution_mode model_parallel --gpu_weight_budget_gib 10
+
+python scripts/analyze_phase3c.py \
+  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3 \
+  --execution_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3/execution_v1
+```
+
+The analyzer loads no model weights or activation tensors. It validates all
+source/freeze/execution gates, capture bytes and primary task manifests, then
+writes case-level and aggregate JSON/CSV tables, a report and static figures.
+Only a complete verified grid can yield `analysis/aggregate_summary.json` with
+`complete=true`. There is no partial-result success mode. Do not treat an older
+analysis file as completion of a newer failed attempt; use its input hashes and
+the current stage gates.
+
+Results separate rescue and stable-control strata. Bootstrap intervals use
+2,000 deterministic base-case resamples per setting, seed 42; repeated layers,
+directions and prompt conditions are not independent replicates. Target-minus-
+background contrasts are computed within each base before aggregation. Tables
+retain temporal and low margin changes, boundary compression, donor-aligned
+patch effects, Recovery denominators, coverage, categorical flips, strict sign
+crossings, zero-margin ties and non-A/B first tokens. No effect threshold or
+equivalence claim is added.
+
+Figures include scope-effect curves, location-matched DeepStack timing curves,
+KO decomposition heatmaps and descriptive all-layer activation-norm curves for
+the two representative rescue IDs already frozen for technical preflight. These
+representatives are not reselected using intervention results. The analysis
+configuration and output checksums are separate from the GPU execution binding;
+amended analysis settings require a separate analysis directory.
+
+These primary entry points still do not send email, detach tasks or request
+SURF Pause. Use a persistent terminal session for explicit execution and back up
+the separate Phase 3C artifacts afterward. No VM/GPU tasks have been launched
+as part of implementation. Completing code/tests does not mean the real CPU
+mapping audit, freeze or GPU stages have completed.
 
 ## Sources
 

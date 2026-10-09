@@ -1610,9 +1610,9 @@ timing controls, then test matched low/temporal attention knockout. The primary
 analysis separates temporal and low margin changes from boundary-advantage
 compression, with explicit causal-edge budget controls.
 
-The CPU preparation tools and GPU baseline/technical-preflight entry point are
-implemented; the primary intervention-grid runner and aggregate analysis are not
-yet implemented. Run `prepare_phase3c.py --stage audit`, then the resumable
+The CPU preparation tools, GPU baseline/technical-preflight, fixed primary grid
+and aggregate analysis are implemented but not yet GPU-validated.
+Run `prepare_phase3c.py --stage audit`, then the resumable
 `audit_phase3c_mappings.py` processor-only audit, and finally
 `prepare_phase3c.py --stage freeze`. The protocol contains the VM commands and
 explicit initial layer/window/mapping/control defaults. Freeze requires actual
@@ -1630,3 +1630,18 @@ captures; the two frozen mover-order representatives undergo a resumable
 152-forward technical grid. Real GPU validation is still pending. Technical
 smoke results are not primary effect estimates, and these commands do not
 activate unattended email or SURF Pause.
+
+After both gates pass, explicitly invoke `run_phase3c.py --stage patch`,
+`--stage routing` and `--stage knockout` using the same frozen execution root.
+The fixed pilot contains 696 observed-donor visual patches, 24 intact routing
+diagnostics and 2,592 matched target/background knockout forwards. Unique atomic
+per-task checkpoints prevent duplicate resume; completed stages are verified
+without reloading weights. No intervention effect selects a case or window.
+
+`analyze_phase3c.py` verifies the full grid and writes decomposed paired-case
+tables, separate rescue/stable summaries, matched background contrasts, scope
+and timing plots, knockout heatmaps and the two frozen representative all-layer
+norm plots. Only complete verified results get `complete=true`. Bootstrap uses
+base cases, not layers, and the report preserves the functional-contribution
+interpretation limit. The protocol uses a fresh `pilot_v3` root because code and
+protocol hashes changed; preserve existing Phase 3C and Phase 3B artifacts.

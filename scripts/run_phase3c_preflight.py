@@ -11,6 +11,7 @@ import shutil
 import tempfile
 import time
 import traceback
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from importlib.metadata import version
 from pathlib import Path
@@ -22,10 +23,11 @@ try:
         digest, file_hash, frozen_write, input_ids_hash, read_json,
     )
     from .phase3c_execution import (
-        checkpoint_rows, execution_hashes, load_selection, require_stage, save_stage_summary, technical_tasks,
+        checkpoint_rows, execution_hashes, load_selection, primary_checkpoint_rows, require_stage, save_stage_summary, technical_tasks,
         technical_failures,
     )
     from .phase3b_paths import load_path_map
+    from .phase3c_primary import PRIMARY_STAGES, patch_outcomes, primary_tasks, route_positions, routes, validate_frozen_result
     from .run_phase3b_vm import parse_gpus, run_lock, worker_environment
 except ImportError:
     from phase3c_core import (
@@ -33,10 +35,11 @@ except ImportError:
         digest, file_hash, frozen_write, input_ids_hash, read_json,
     )
     from phase3c_execution import (
-        checkpoint_rows, execution_hashes, load_selection, require_stage, save_stage_summary, technical_tasks,
+        checkpoint_rows, execution_hashes, load_selection, primary_checkpoint_rows, require_stage, save_stage_summary, technical_tasks,
         technical_failures,
     )
     from phase3b_paths import load_path_map
+    from phase3c_primary import PRIMARY_STAGES, patch_outcomes, primary_tasks, route_positions, routes, validate_frozen_result
     from run_phase3b_vm import parse_gpus, run_lock, worker_environment
 
 
@@ -260,11 +263,48 @@ class Engine:
             result["passed"] = result["noop_parity"]["passed"]
         return result
 
+    def primary(self, prepared, mapping, task, captures):
+        if task["kind"] == "routing_baseline":
+            try:
+                from .phase3c_interventions import AttentionKnockout
+            except ImportError:
+                from phase3c_interventions import AttentionKnockout
+            condition = task["condition"]
+            length = len(mapping["processor_records"][condition]["input_ids"])
+            observed = []
+            with ExitStack() as stack:
+                for route in routes(mapping, condition):
+                    queries, keys, budget = route_positions(mapping, condition, route)
+                    observer = AttentionKnockout(self.text.layers, list(range(36)), queries, keys, length, enabled=False)
+                    stack.enter_context(observer.installed())
+                    observed.append((route, queries, keys, budget, observer))
+                logits = self.forward(prepared)
+            result = {"spec": task, "prompt_token_count": length,
+                "routes": [{**route, "query_positions": queries, "key_positions": keys,
+                            "edge_budget": budget, "mask_audit": observer.validate()}
+                           for route, queries, keys, budget, observer in observed],
+                "noop_parity": logits_parity(captures[condition]["logits"], logits, exact=True),
+                "baseline_decision": self.decide(captures[condition]["logits"], prepared["row"]),
+                "decision": self.decide(logits, prepared["row"])}
+            result["passed"] = result["noop_parity"]["passed"]
+        else:
+            converted = {**task, "kind": "transplant_smoke" if task["kind"] == "visual_patch" else "knockout_smoke"}
+            result = self.technical(prepared, mapping, converted, captures)
+            result["spec"] = task
+            if task["kind"] == "visual_patch":
+                donor = self.decide(captures[result["donor_condition"]]["logits"], prepared["row"])
+                result["donor_baseline_decision"] = donor
+                result.update(patch_outcomes(result["baseline_decision"]["margin"], result["decision"]["margin"], donor["margin"]))
+        result["is_primary_effect_estimate"] = task["kind"] != "routing_baseline"
+        result["input_tensor_sha256"] = prepared["input_tensor_sha256"]
+        return result
+
 
 def bind_execution(root, frozen, runtime, project_root, path_map):
     tasks_binding = {"technical_noop_max_abs_diff": 0.0, "standard_logit_rtol": 0.001,
         "standard_logit_atol": 0.25, "attention_row_sum_atol": 0.005,
-        "technical_smoke_only": True, "primary_grid_runner_implemented": False}
+        "technical_smoke_is_primary": False, "primary_grid_runner_implemented": True,
+        "primary_control": "exact_event_bin_background", "primary_resume": "unique_task_ids"}
     config = {"schema": SCHEMA, "artifact_type": "real", "selection_fingerprint": frozen["selection_fingerprint"],
         "runtime": runtime, "execution_code_sha256": execution_hashes(), "technical_settings": tasks_binding,
         "project_root": str(Path(project_root).resolve()), "path_map": path_map}
@@ -290,31 +330,45 @@ def check_execution_request(root, frozen, project_root, path_map, mode, weight_b
         raise ValueError("Incompatible execution request; preserve this checkpoint and use a new execution root.")
 
 
-def progress(output, stage, completed, total, new, started, load_sec):
+def progress(output, stage, completed, total, new, started, load_sec, failed=0):
     elapsed = time.perf_counter() - started
-    remaining = total - completed
+    remaining = total - completed + failed
     status = {"stage": stage, "completed": completed, "expected": total,
         "newly_computed": new, "elapsed_sec": elapsed, "model_load_sec": load_sec,
+        "passed_tasks": completed - failed, "failed_tasks": failed,
         "remaining": remaining, "eta_sec": elapsed / new * remaining if new else None,
-        "checkpoint": str(Path(output) / "rows.jsonl"), "primary_grid_complete": False}
+        "checkpoint": str(Path(output) / ("task_checkpoints" if stage in PRIMARY_STAGES else "rows.jsonl")),
+        "consolidated_rows": str(Path(output) / "rows.jsonl"), "primary_grid_complete": False}
     atomic_write(Path(output) / "progress_status.json", status)
-    print(f"Phase 3C {stage}: {completed}/{total}; new={new}; elapsed={elapsed / 60:.1f} min; "
+    print(f"Phase 3C {stage}: passed={completed - failed}/{total}; failed={failed}; new={new}; elapsed={elapsed / 60:.1f} min; "
           f"ETA={status['eta_sec'] / 60:.1f} min; checkpoint={status['checkpoint']}" if new else
           f"Phase 3C {stage}: reused {completed}/{total}; checkpoint={status['checkpoint']}", flush=True)
 
 
 def run_stage(root, frozen, pairs, mappings, engine, execution, stage, max_tasks=None, retry_failed=False):
     root = Path(root)
-    tasks = ([{"task_id": row["eval_id"], "pair_id": pair_id, "condition": condition, "kind": "baseline"}
-              for pair_id, pair in pairs.items() for condition, row in pair.items()]
-             if stage == "baseline" else technical_tasks(frozen, mappings))
+    if stage == "baseline":
+        tasks = [{"task_id": row["eval_id"], "pair_id": pair_id, "condition": condition, "kind": "baseline"}
+                 for pair_id, pair in pairs.items() for condition, row in pair.items()]
+    elif stage == "preflight":
+        tasks = technical_tasks(frozen, mappings)
+    else:
+        tasks = primary_tasks(frozen, mappings, stage)
     expected = {task["task_id"] for task in tasks}
     output = root / stage
     frozen_write(output / "task_manifest.jsonl", tasks, jsonl=True)
-    saved = checkpoint_rows(output / "rows.jsonl", execution["execution_fingerprint"], expected)
-    if stage == "preflight":
+    saved = (primary_checkpoint_rows(output, execution["execution_fingerprint"], expected) if stage in PRIMARY_STAGES
+             else checkpoint_rows(output / "rows.jsonl", execution["execution_fingerprint"], expected))
+    if stage != "baseline":
         baseline_ids = {row["eval_id"] for pair in pairs.values() for row in pair.values()}
         baselines = require_stage(root, execution, pairs, "baseline", baseline_ids)
+        if stage in PRIMARY_STAGES:
+            controls = technical_tasks(frozen, mappings)
+            require_stage(root, execution, pairs, "preflight", {task["task_id"] for task in controls}, expected_tasks=controls)
+        if stage == "knockout":
+            intact = primary_tasks(frozen, mappings, "routing")
+            require_stage(root, execution, pairs, "routing", {task["task_id"] for task in intact},
+                          mappings, baselines, intact)
     else:
         baselines = {}
         for item in saved.values():
@@ -323,10 +377,17 @@ def run_stage(root, frozen, pairs, mappings, engine, execution, stage, max_tasks
                 if (file_hash(item["capture_index_path"]) != item["capture_index_sha256"] or
                         file_hash(index["vectors_path"]) != index["vectors_sha256"]):
                     raise ValueError("Resumed baseline capture bytes changed.")
-    save_stage_summary(output, execution, pairs, saved, expected, stage)
+    def summary():
+        if stage in PRIMARY_STAGES:
+            atomic_write(output / "rows.jsonl", [saved[item["task_id"]] for item in tasks if item["task_id"] in saved], jsonl=True)
+        return save_stage_summary(output, execution, pairs, saved, expected, stage, mappings, baselines)
+
+    initial = summary()
+    if stage in PRIMARY_STAGES and any(saved[item["task_id"]].get("passed") is True for item in initial["failures"]):
+        raise ValueError("A claimed-passed primary checkpoint failed independent verification; preserve it and diagnose.")
     if not retry_failed and any(item.get("passed") is not True for item in saved.values()):
         print("A failed task is checkpointed. No new tasks will run without an explicit --retry_failed.", flush=True)
-        return save_stage_summary(output, execution, pairs, saved, expected, stage)
+        return summary()
     started, computed, prepared, current, captures = time.perf_counter(), 0, None, None, {}
     for task in tasks:
         task_id = task["task_id"]
@@ -346,7 +407,7 @@ def run_stage(root, frozen, pairs, mappings, engine, execution, stage, max_tasks
                 gc.collect()
                 engine.torch.cuda.empty_cache()
                 prepared = engine.prepare(row, mappings[pair_id])
-                if stage == "preflight":
+                if stage != "baseline":
                     if prepared["input_tensor_sha256"] != baselines[row["eval_id"]].get("input_tensor_sha256"):
                         raise ValueError("Live processor tensor bytes differ from the passed GPU baseline.")
                     captures = {}
@@ -354,29 +415,48 @@ def run_stage(root, frozen, pairs, mappings, engine, execution, stage, max_tasks
                         index = read_json(baselines[pairs[pair_id][side]["eval_id"]]["capture_index_path"])
                         captures[side] = engine.torch.load(index["vectors_path"], map_location="cpu", weights_only=True)
                 current = (pair_id, condition)
-            result.update(engine.baseline(prepared, mappings[pair_id], root, execution["execution_fingerprint"])
-                          if stage == "baseline" else engine.technical(prepared, mappings[pair_id], task, captures))
+            if stage == "baseline":
+                result.update(engine.baseline(prepared, mappings[pair_id], root, execution["execution_fingerprint"]))
+            elif stage in PRIMARY_STAGES:
+                result.update(engine.primary(prepared, mappings[pair_id], task, captures))
+            else:
+                result.update(engine.technical(prepared, mappings[pair_id], task, captures))
+            if stage in PRIMARY_STAGES:
+                failures = validate_frozen_result(result, pairs, mappings, baselines)
+                result["passed"] = not failures
+                if failures:
+                    result["validation_failures"] = failures
         except Exception as exc:
-            result.update({"failure_type": type(exc).__name__, "failure_message": str(exc), "spec": task})
+            result.update({"passed": False, "failure_type": type(exc).__name__, "failure_message": str(exc), "spec": task})
             failure_traceback = traceback.format_exc()
             print(failure_traceback, flush=True)
         result["elapsed_sec"] = time.perf_counter() - task_started
         if not result["passed"]:
             errors_path = output / "errors.json"
             errors = read_json(errors_path) if errors_path.exists() else []
+            if stage == "baseline":
+                reasons = baseline_failures(row, result)
+            elif stage in PRIMARY_STAGES:
+                reasons = result.get("validation_failures") or validate_frozen_result(result, pairs, mappings, baselines)
+            else:
+                reasons = technical_failures(result)
             errors.append({**result, "attempted_at": datetime.now(timezone.utc).isoformat(),
-                "traceback": failure_traceback, "gate_failures": baseline_failures(row, result)
-                if stage == "baseline" else technical_failures(result)})
+                "traceback": failure_traceback, "gate_failures": reasons})
             atomic_write(errors_path, errors)
         saved[task_id] = result
-        atomic_write(output / "rows.jsonl", [saved[item["task_id"]] for item in tasks if item["task_id"] in saved], jsonl=True)
+        if stage in PRIMARY_STAGES:
+            atomic_write(output / "task_checkpoints" / f"{task_id}.json", result)
+        else:
+            atomic_write(output / "rows.jsonl", [saved[item["task_id"]] for item in tasks if item["task_id"] in saved], jsonl=True)
         computed += 1
-        save_stage_summary(output, execution, pairs, saved, expected, stage)
-        progress(output, stage, len(saved), len(tasks), computed, started, engine.load_sec)
+        if stage not in PRIMARY_STAGES:
+            summary()
+        progress(output, stage, len(saved), len(tasks), computed, started, engine.load_sec,
+                 failed=sum(item.get("passed") is not True for item in saved.values()))
         if not result["passed"]:
             print("Stage stopped at a failed control. Preserve evidence; --retry_failed explicitly retries it.", flush=True)
             break
-    summary = save_stage_summary(output, execution, pairs, saved, expected, stage)
+    final_summary = summary()
     if stage == "preflight":
         # Decomposition is technical smoke output, never the primary pilot estimate.
         comparisons = []
@@ -393,12 +473,12 @@ def run_stage(root, frozen, pairs, mappings, engine, execution, stage, max_tasks
                 **boundary_outcomes(low["baseline_decision"]["margin"], temporal["baseline_decision"]["margin"],
                                     low["decision"]["margin"], temporal["decision"]["margin"])})
         atomic_write(output / "boundary_smoke_diagnostics.json", comparisons)
-    return summary
+    return final_summary
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", required=True, choices=("baseline", "preflight"))
+def main(stages=("baseline", "preflight"), description=None):
+    parser = argparse.ArgumentParser(description=description or __doc__)
+    parser.add_argument("--stage", required=True, choices=stages)
     parser.add_argument("--plan_dir", required=True)
     parser.add_argument("--output_dir", help="Separate execution root; default PLAN_DIR/execution_v1.")
     parser.add_argument("--project_root", default=str(Path(__file__).resolve().parents[1]))
@@ -430,12 +510,18 @@ def main():
         audit_config = read_json(Path(args.plan_dir) / "processor_audit/config.json")
         path_map = dict(audit_config["path_map"])
         path_map.update(load_path_map(args.path_map))
-        if args.stage == "preflight":
+        if args.stage != "baseline":
             execution = read_json(root / "execution_config.json")
             if (execution["execution_code_sha256"] != execution_hashes() or
                     execution["selection_fingerprint"] != frozen["selection_fingerprint"]):
                 raise ValueError("Execution code or selection changed; baseline/preflight must use a new root.")
-            require_stage(root, execution, pairs, "baseline", {row["eval_id"] for pair in pairs.values() for row in pair.values()})
+            baselines = require_stage(root, execution, pairs, "baseline", {row["eval_id"] for pair in pairs.values() for row in pair.values()})
+            if args.stage in PRIMARY_STAGES:
+                controls = technical_tasks(frozen, mappings)
+                require_stage(root, execution, pairs, "preflight", {task["task_id"] for task in controls}, expected_tasks=controls)
+                if args.stage == "knockout":
+                    intact = primary_tasks(frozen, mappings, "routing")
+                    require_stage(root, execution, pairs, "routing", {task["task_id"] for task in intact}, mappings, baselines, intact)
         environment = worker_environment(",".join(gpus), storage_root)
         for name in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE"):
             os.environ.pop(name, None)
@@ -443,16 +529,34 @@ def main():
         with run_lock(root):
             check_execution_request(root, frozen, args.project_root, path_map, args.execution_mode,
                                     args.gpu_weight_budget_gib, gpus)
+            if args.stage in PRIMARY_STAGES:
+                tasks = primary_tasks(frozen, mappings, args.stage)
+                expected = {task["task_id"] for task in tasks}
+                saved = primary_checkpoint_rows(root / args.stage, execution["execution_fingerprint"], expected)
+                specs = {task["task_id"]: task for task in tasks}
+                for key, row in saved.items():
+                    if row.get("passed") and (row.get("spec") != specs[key] or
+                            validate_frozen_result(row, pairs, mappings, baselines)):
+                        raise ValueError("A claimed-passed primary checkpoint is invalid; no weights were loaded.")
+                if set(saved) == expected and all(row.get("passed") for row in saved.values()):
+                    frozen_write(root / args.stage / "task_manifest.jsonl", tasks, jsonl=True)
+                    atomic_write(root / args.stage / "rows.jsonl", [saved[task["task_id"]] for task in tasks], jsonl=True)
+                    summary = save_stage_summary(root / args.stage, execution, pairs, saved, expected, args.stage, mappings, baselines)
+                    print(json.dumps(summary, indent=2, sort_keys=True))
+                    print("All requested tasks reused and verified; no model weights loaded.", flush=True)
+                    return
+                if not args.retry_failed and any(row.get("passed") is not True for row in saved.values()):
+                    parser.exit(2, "Stored failure requires explicit --retry_failed; no model weights loaded.\n")
             engine = Engine(frozen["settings"], args.execution_mode, args.gpu_weight_budget_gib)
             engine.project_root, engine.path_map = args.project_root, path_map
             execution = bind_execution(root, frozen, engine.runtime, args.project_root, path_map)
             summary = run_stage(root, frozen, pairs, mappings, engine, execution, args.stage, args.max_tasks, args.retry_failed)
         print(json.dumps(summary, indent=2, sort_keys=True))
         if not summary["passed"]:
-            parser.exit(2, "Stage incomplete or blocked. Check checkpoint/errors; primary intervention grid not started.\n")
-        print("Technical stage PASSED; this does not mark the primary Phase 3C experiment complete.", flush=True)
+            parser.exit(2, "Stage incomplete or blocked. Check checkpoint/errors; experiment not complete.\n")
+        print("Stage PASSED; experiment completion still requires all primary stages and CPU analysis.", flush=True)
     except (ValueError, RuntimeError, FileNotFoundError) as exc:
-        parser.exit(1, f"Phase 3C execution blocked: {exc}\nNo primary intervention grid was started.\n")
+        parser.exit(1, f"Phase 3C execution blocked: {exc}\nPreserve checkpoints; experiment not complete.\n")
 
 
 if __name__ == "__main__":

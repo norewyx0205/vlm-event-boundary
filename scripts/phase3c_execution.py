@@ -18,6 +18,7 @@ except ImportError:
 
 EXECUTION_FILES = (
     "phase3c_execution.py", "phase3c_interventions.py", "run_phase3c_preflight.py",
+    "phase3c_primary.py", "run_phase3c.py",
     "phase3c_core.py", "prepare_phase3c.py", "audit_phase3c_mappings.py",
     "run_phase3b_patching.py", "phase3b_baseline.py", "phase3b_core.py", "phase3b_paths.py",
     "run_eval.py", "probe_attention_roi.py", "activation_patching_core.py", "run_phase3b_vm.py", "common.py",
@@ -117,6 +118,18 @@ def checkpoint_rows(path, fingerprint, expected_ids):
     return lookup
 
 
+def primary_checkpoint_rows(output, fingerprint, expected_ids):
+    lookup = {}
+    for path in sorted((Path(output) / "task_checkpoints").glob("*.json")):
+        row = read_json(path)
+        key = row["task_id"]
+        if (path.stem != key or key not in expected_ids or key in lookup or
+                row.get("execution_fingerprint") != fingerprint):
+            raise ValueError("Primary checkpoint contains a foreign, duplicate or incompatible task.")
+        lookup[key] = row
+    return lookup
+
+
 def baseline_reasons(pairs, rows):
     reasons = []
     for pair_id, pair in pairs.items():
@@ -193,11 +206,22 @@ def technical_failures(row):
     return failures
 
 
-def save_stage_summary(output, execution, pairs, rows, expected, stage):
+def save_stage_summary(output, execution, pairs, rows, expected, stage, mappings=None, baselines=None):
+    try:
+        from .phase3c_primary import PRIMARY_STAGES, validate_frozen_result
+    except ImportError:
+        from phase3c_primary import PRIMARY_STAGES, validate_frozen_result
     output = Path(output)
     missing = sorted(set(expected) - set(rows))
-    failures = baseline_reasons(pairs, rows) if stage == "baseline" else [
-        {"task_id": key, "reasons": technical_failures(row)} for key, row in rows.items() if technical_failures(row)]
+    if stage == "baseline":
+        failures = baseline_reasons(pairs, rows)
+    else:
+        failures = []
+        for key, row in rows.items():
+            reasons = (validate_frozen_result(row, pairs, mappings, baselines) if stage in PRIMARY_STAGES
+                       else technical_failures(row))
+            if reasons:
+                failures.append({"task_id": key, "reasons": reasons})
     summary = {"schema": SCHEMA, "stage": stage, "artifact_type": "real",
         "execution_fingerprint": execution["execution_fingerprint"],
         "passed": not missing and not failures, "completed": len(rows), "expected": len(expected),
@@ -206,12 +230,14 @@ def save_stage_summary(output, execution, pairs, rows, expected, stage):
         "rows_sha256": file_hash(output / "rows.jsonl") if (output / "rows.jsonl").exists() else None,
         "task_manifest_sha256": file_hash(output / "task_manifest.jsonl") if (output / "task_manifest.jsonl").exists() else None,
         "primary_intervention_grid_complete": False,
-        "next_stage": "technical_preflight" if stage == "baseline" else "primary_runner_not_yet_implemented"}
+        "primary_stage_complete": stage in PRIMARY_STAGES and not missing and not failures,
+        "next_stage": {"baseline": "preflight", "preflight": "patch_or_routing",
+                       "patch": "routing_and_knockout", "routing": "knockout", "knockout": "cpu_analysis"}[stage]}
     atomic_write(output / "summary.json", summary)
     return summary
 
 
-def require_stage(root, execution, pairs, stage, expected):
+def require_stage(root, execution, pairs, stage, expected, mappings=None, baselines=None, expected_tasks=None):
     output = Path(root) / stage
     config_path = Path(root) / "execution_config.json"
     summary = read_json(output / "summary.json")
@@ -224,7 +250,11 @@ def require_stage(root, execution, pairs, stage, expected):
     tasks = read_jsonl(output / "task_manifest.jsonl")
     if len(tasks) != len(expected) or {task["task_id"] for task in tasks} != set(expected):
         raise ValueError(f"{stage} task manifest has invalid coverage.")
+    if expected_tasks is not None and tasks != expected_tasks:
+        raise ValueError(f"{stage} task manifest differs from the fixed protocol grid.")
     rows = checkpoint_rows(output / "rows.jsonl", execution["execution_fingerprint"], set(expected))
+    if stage in ("patch", "routing", "knockout") and rows != primary_checkpoint_rows(output, execution["execution_fingerprint"], set(expected)):
+        raise ValueError("Consolidated primary rows differ from per-task checkpoints.")
     if set(rows) != set(expected) or summary.get("completed") != len(expected) or summary.get("expected") != len(expected):
         raise ValueError(f"{stage} gate has incomplete task coverage.")
     if stage == "baseline":
@@ -238,6 +268,13 @@ def require_stage(root, execution, pairs, stage, expected):
                     capture["eval_id"] != row["eval_id"] or capture["site_count"] != 39 or
                     capture["input_tensor_sha256"] != row["input_tensor_sha256"]):
                 raise ValueError("Baseline capture bytes/fingerprint changed.")
-    elif any(technical_failures(row) for row in rows.values()) or any(rows[task["task_id"]].get("spec") != task for task in tasks):
-        raise ValueError("A technical control failed.")
+    else:
+        try:
+            from .phase3c_primary import PRIMARY_STAGES, validate_frozen_result
+        except ImportError:
+            from phase3c_primary import PRIMARY_STAGES, validate_frozen_result
+        failures = [validate_frozen_result(row, pairs, mappings, baselines) if stage in PRIMARY_STAGES
+                    else technical_failures(row) for row in rows.values()]
+        if any(failures) or any(rows[task["task_id"]].get("spec") != task for task in tasks):
+            raise ValueError(f"{stage} results failed independent intervention verification.")
     return rows
