@@ -42,7 +42,8 @@ def backup_files(root, reports_only):
     return files
 
 
-def create_backup(run_root, backup_dir, reports_only=False, part_bytes=4 * 1024**3):
+def create_backup(run_root, backup_dir, reports_only=False, part_bytes=4 * 1024**3, *,
+                  file_provider=None, bundle_prefix="phase3b_backup", metadata=None):
     root, destination = Path(run_root).resolve(), Path(backup_dir).resolve()
     if not root.is_dir() or destination.is_relative_to(root):
         raise ValueError("Use an existing run root and a backup directory outside it.")
@@ -50,7 +51,7 @@ def create_backup(run_root, backup_dir, reports_only=False, part_bytes=4 * 1024*
         raise ValueError("Backup part size must be positive.")
     destination.mkdir(parents=True, exist_ok=True)
     with run_lock(root):
-        files = backup_files(root, reports_only)
+        files = (file_provider or backup_files)(root, reports_only)
         if not files:
             raise ValueError("No research artifacts found to back up.")
         total = sum(path.stat().st_size for path in files.values())
@@ -61,7 +62,9 @@ def create_backup(run_root, backup_dir, reports_only=False, part_bytes=4 * 1024*
                 "a reports-only ZIP does NOT back up activations. Do not delete checkpoints to make room."
             )
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-        bundle = destination / f"phase3b_backup_{stamp}"
+        if bundle_prefix not in {"phase3b_backup", "phase3c_backup"}:
+            raise ValueError("Unsupported backup package prefix.")
+        bundle = destination / f"{bundle_prefix}_{stamp}"
         bundle.mkdir()
         manifest = {
             "schema": "phase3b_local_backup_v1", "artifact_type": "real",
@@ -73,6 +76,10 @@ def create_backup(run_root, backup_dir, reports_only=False, part_bytes=4 * 1024*
             "run_status": json.loads((root / "vm_last_status.json").read_text()) if (root / "vm_last_status.json").is_file() else None,
             "files": [], "archives": [],
         }
+        if metadata:
+            if set(metadata) & (set(manifest) - {"schema"}):
+                raise ValueError("Extra backup metadata cannot override coverage or verification fields.")
+            manifest.update(metadata)
         started, copied, part_index, part_size, archive = time.perf_counter(), 0, 0, 0, None
         archive_path = None
         def finish_part():

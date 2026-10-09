@@ -1645,3 +1645,15 @@ norm plots. Only complete verified results get `complete=true`. Bootstrap uses
 base cases, not layers, and the report preserves the functional-contribution
 interpretation limit. The protocol uses a fresh `pilot_v3` root because code and
 protocol hashes changed; preserve existing Phase 3C and Phase 3B artifacts.
+
+The separate [Phase 3C VM runbook](docs/phase3c_vm.md) adds an explicit persistent
+orchestrator and optional unattended lifecycle. `run_phase3c_vm.py` validates
+the frozen inputs and gates, then runs the primary stages and CPU analysis;
+`launch_phase3c_vm.py --dry_run` performs read-only local validation, while an
+explicit real launch runs in tmux. Email and SURF Pause are opt-in. Pause is
+blocked unless all available evidence has a verified full backup and no other
+research/GPU job is active. `backup_phase3c.py` includes selected videos and the
+preparation snapshot, without duplicating the full Phase 3B source archive.
+Download every part and verify locally after each run. This execution layer
+does not alter the scientific protocol, select new cases or start GPU work
+automatically when updating the repository.
