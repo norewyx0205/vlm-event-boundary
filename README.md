@@ -1600,3 +1600,33 @@ references to the old run.
 Inspect `baseline_audit/summary.json` and `checkpoint_reuse.json` before explicitly
 starting full with the same arguments. The tmux/email/Pause wrapper also accepts
 `--stage baseline`; `full` automatically revalidates/reuses the baseline gate.
+
+## Phase 3C: Visual-State Sufficiency and Attention Routing
+
+The follow-up [Phase 3C protocol](docs/phase3c_protocol.md) fixes the methodological
+scope of an 8-rescue/4-stable-control pilot: audit intervention completeness,
+compare larger observed-donor visual supports and location-matched DeepStack
+timing controls, then test matched low/temporal attention knockout. The primary
+analysis separates temporal and low margin changes from boundary-advantage
+compression, with explicit causal-edge budget controls.
+
+The CPU preparation tools and GPU baseline/technical-preflight entry point are
+implemented; the primary intervention-grid runner and aggregate analysis are not
+yet implemented. Run `prepare_phase3c.py --stage audit`, then the resumable
+`audit_phase3c_mappings.py` processor-only audit, and finally
+`prepare_phase3c.py --stage freeze`. The protocol contains the VM commands and
+explicit initial layer/window/mapping/control defaults. Freeze requires actual
+visual positions, complete observed-donor supports and exact background edge
+budgets; an archived ROI-only mapping or a balanced preview cannot satisfy it.
+
+Phase 3B artifacts remain unchanged; Phase 3C uses a separate artifact root and
+schema. Preparation records provenance/code/configuration hashes, prints
+elapsed time/checkpoint progress and never starts GPU inference. A frozen
+12-case cohort still requires an execution-environment baseline and technical
+hook/mask preflight before primary patching or knockout. Explicitly invoke
+`run_phase3c_preflight.py --stage baseline` followed by `--stage preflight` for
+these GPU gates. The baseline saves 36 block-output and three post-DeepStack
+captures; the two frozen mover-order representatives undergo a resumable
+152-forward technical grid. Real GPU validation is still pending. Technical
+smoke results are not primary effect estimates, and these commands do not
+activate unattended email or SURF Pause.
