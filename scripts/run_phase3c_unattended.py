@@ -96,7 +96,7 @@ def assert_quiescent():
     processes = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, timeout=30, check=True)
     active = re.compile(r"(?:^|[ /])(?:run_phase3c_vm|run_phase3c_preflight|run_phase3c|audit_phase3c_mappings|"
                         r"prepare_phase3c|analyze_phase3c|backup_phase3c|run_phase3c_unattended|"
-                        r"run_phase3b_unattended|launch_phase3c_vm|launch_phase3b_vm)\.py(?:\s|$)")
+                        r"run_phase3b_unattended|run_phase3c_support|launch_phase3c_vm|launch_phase3b_vm)\.py(?:\s|$)")
     tmux = shutil.which("tmux")
     tmux_executable = str(Path(tmux).resolve()) if tmux else None
     for line in processes.stdout.splitlines():
