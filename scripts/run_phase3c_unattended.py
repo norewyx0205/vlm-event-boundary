@@ -97,7 +97,22 @@ def assert_quiescent():
     active = re.compile(r"(?:^|[ /])(?:run_phase3c_vm|run_phase3c_preflight|run_phase3c|audit_phase3c_mappings|"
                         r"prepare_phase3c|analyze_phase3c|backup_phase3c|run_phase3c_unattended|"
                         r"run_phase3b_unattended|launch_phase3c_vm|launch_phase3b_vm)\.py(?:\s|$)")
-    if any(active.search(line) and line.split(maxsplit=1)[0] != str(os.getpid()) for line in processes.stdout.splitlines()):
+    tmux = shutil.which("tmux")
+    tmux_executable = str(Path(tmux).resolve()) if tmux else None
+    for line in processes.stdout.splitlines():
+        if not active.search(line):
+            continue
+        pid = line.split(maxsplit=1)[0]
+        if pid == str(os.getpid()):
+            continue
+        # A tmux server's argv contains its launch command, not a live Python worker.
+        try:
+            executable = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            executable = None
+        if tmux_executable is not None and executable == tmux_executable:
+            continue
+        # Unknown/unreadable executables remain fail-closed.
         raise RuntimeError("Another Phase 3C job is active; automatic Pause is blocked.")
 
 

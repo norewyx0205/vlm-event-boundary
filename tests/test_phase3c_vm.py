@@ -376,6 +376,27 @@ class Phase3CVmTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "active"):
                 job.assert_quiescent()
 
+    def test_idle_check_ignores_verified_tmux_transport(self):
+        transport = f"{os.getpid() + 100} tmux new-session -d exec python scripts/run_phase3c_unattended.py"
+        with patch.object(job, "legacy_idle"), \
+             patch.object(job.subprocess, "run", return_value=SimpleNamespace(stdout=transport)), \
+             patch.object(job.shutil, "which", return_value="/usr/bin/tmux"), \
+             patch.object(job.Path, "resolve", return_value=Path("/usr/bin/tmux")), \
+             patch.object(job.os, "readlink", return_value="/usr/bin/tmux"):
+            job.assert_quiescent()
+
+    def test_idle_check_still_blocks_python_or_unreadable_executables(self):
+        other = f"{os.getpid() + 100} tmux exec python scripts/run_phase3c_unattended.py"
+        for value in ("/usr/bin/python3.12", PermissionError("unreadable")):
+            with self.subTest(executable=value), patch.object(job, "legacy_idle"), \
+                 patch.object(job.subprocess, "run", return_value=SimpleNamespace(stdout=other)), \
+                 patch.object(job.shutil, "which", return_value="/usr/bin/tmux"), \
+                 patch.object(job.Path, "resolve", return_value=Path("/usr/bin/tmux")), \
+                 patch.object(job.os, "readlink", **({"side_effect": value} if isinstance(value, Exception)
+                                                    else {"return_value": value})):
+                with self.assertRaisesRegex(RuntimeError, "active"):
+                    job.assert_quiescent()
+
 
 if __name__ == "__main__":
     unittest.main()
