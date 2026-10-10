@@ -1657,3 +1657,11 @@ preparation snapshot, without duplicating the full Phase 3B source archive.
 Download every part and verify locally after each run. This execution layer
 does not alter the scientific protocol, select new cases or start GPU work
 automatically when updating the repository.
+
+`notebooks/phase3c_vm.ipynb` is the independent VM entry point. It defaults to
+read-only `status`; CPU preparation, GPU gates/full and manual backup require
+explicit confirmations. A frozen cohort is reused without rewriting its audit.
+`inspect_phase3c.py` reports missing artifacts and existing checkpoint progress;
+`--verify` independently checks frozen/gate/capture provenance without loading
+a processor/model. Recorded progress alone is never presented as a verified
+scientific result. The historical notebooks and Phase 3B evidence stay unchanged.

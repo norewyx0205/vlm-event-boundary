@@ -6,6 +6,60 @@ evidence. The new runner does not rescreen, refreeze, modify case IDs or rerun
 Part 1/Phase 1/Phase 3B. Real CPU eligibility, cohort freeze and GPU gates still
 need to be completed on the VM before the primary pilot can start.
 
+## Notebook and Readiness
+
+Open `notebooks/phase3c_vm.ipynb` in the VM's JupyterLab with the pinned `phase3b`
+kernel. It is a separate workflow; leave the historical Phase 3B and Colab
+notebooks unchanged. Its default `PHASE3C_ACTION = "status"` only reads existing
+records. Run all does not start a processor, GPU job, backup, email or Pause.
+Reported summaries/progress remain explicitly unverified.
+
+Choose one action per execution of the notebook:
+
+- `prepare`: archive audit, resumable processor-only mapping, then freeze.
+  Requires `PHASE3C_CONFIRM_CPU_PREPARATION = True`. Individual `audit`, `mapping`
+  and `freeze` actions are also supported. A processor failure/incomplete quota
+  blocks freeze; no subsequent GPU action is invoked automatically.
+- `verify`: read-only reconstruction of the existing freeze and checksum
+  validation of available completed gates. This may scan large activation files,
+  but does not load a processor/model or request GPU work.
+- `baseline` / `preflight`: explicit GPU gates with
+  `PHASE3C_CONFIRM_GPU_RUN = True`; inspect each result before the next stage.
+- `dry_run_full`: validate prerequisites and print the background launch command
+  without API, SMTP, tmux, GPU or file writes.
+- `full`: requires both GPU confirmation and
+  `PHASE3C_PREFLIGHT_REVIEWED = True`. The confirmation does not bypass artifact
+  validation. Background execution defaults to tmux, email/Pause to disabled.
+- `analyze`: verify completed primary evidence and rerun CPU analysis; no GPU
+  inference. Immutable analysis settings still apply.
+- `backup`: explicit full stopped-run package with
+  `PHASE3C_CONFIRM_BACKUP = True`. The end status cell normally only displays
+  the lifecycle's existing package, never duplicates a running job's backup.
+
+Once the selection is frozen, `prepare` validates/reuses it without rerunning
+the processor or changing progress timestamps. Individual preparation actions
+are blocked after freeze; use `status`/`verify`, preserving frozen evidence.
+No notebook output substitutes for real artifacts and there are no mock model
+predictions. The notebook forwards the same scientific parameters and guards
+as the CLI, without changing the frozen protocol.
+
+Readiness can also be viewed from a terminal at any time:
+
+```bash
+python scripts/inspect_phase3c.py \
+  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3
+
+python scripts/inspect_phase3c.py \
+  --plan_dir /data/yuxuanstorage/vlm_phase3c/pilot_v3 --verify --json
+```
+
+The inspector reports exact missing paths, recorded progress/elapsed time/ETA
+and a suggested next action. Missing/incomplete gates do not become verified
+because a summary exists. An incomplete checkpoint is distinguished from a
+recorded failure or corrupted provenance. Inspection never repairs a partial
+freeze or writes files. A verified artifact snapshot does not authorize launch
+or confirm the latest attempt/mail/Pause succeeded; runtime guards still apply.
+
 ## Persistent Layout
 
 Use `/data/yuxuanstorage`, not `/mnt/scratch` or the VM home disk:
