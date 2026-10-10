@@ -70,8 +70,14 @@ def validate_job_args(args):
 def vm_options(args):
     options = ["--stage", args.stage, "--plan_dir", args.plan_dir, "--output_root", args.output_root,
         "--storage_root", args.storage_root, "--project_root", args.project_root, "--gpus", args.gpus,
-        "--execution_mode", args.execution_mode, "--gpu_weight_budget_gib", str(args.gpu_weight_budget_gib),
-        "--bootstrap_repeats", str(args.bootstrap_repeats)]
+        "--execution_mode", args.execution_mode, "--bootstrap_repeats", str(args.bootstrap_repeats)]
+    parser = argparse.ArgumentParser(add_help=False)
+    add_arguments(parser)
+    default_budget = parser.get_default("gpu_weight_budget_gib")
+    # JSON fingerprints distinguish an omitted default (10) from parsed "10" (10.0).
+    if (type(args.gpu_weight_budget_gib) is not type(default_budget) or
+            args.gpu_weight_budget_gib != default_budget):
+        options.extend(["--gpu_weight_budget_gib", str(args.gpu_weight_budget_gib)])
     if args.path_map:
         options.extend(["--path_map", args.path_map])
     if args.retry_failed:

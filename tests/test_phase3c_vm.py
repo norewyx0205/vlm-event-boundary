@@ -72,6 +72,34 @@ class Phase3CVmTest(unittest.TestCase):
                 vm.build_plan(args)
             self.assertEqual(data[6].calls, [])
 
+    def test_default_budget_binding_survives_launcher_and_child_cli(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, _ = self.fixture(directory)
+            original = self.save_binding(args)
+            parser = argparse.ArgumentParser()
+            job.add_job_arguments(parser)
+            launched = parser.parse_args(launch.launch_command(args)[3:])
+            child_parser = argparse.ArgumentParser()
+            vm.add_arguments(child_parser)
+            child = vm.normalized_args(child_parser.parse_args(job.vm_options(launched)))
+            self.assertEqual(type(child.gpu_weight_budget_gib), type(args.gpu_weight_budget_gib))
+            rebound, _ = vm.build_plan(child)
+            self.assertEqual(rebound, original)
+
+    def test_explicit_and_default_budgets_keep_their_json_types(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args, _ = self.fixture(directory)
+            for budget in (10, 10.0, 9.5):
+                with self.subTest(budget=budget, numeric_type=type(budget).__name__):
+                    args.gpu_weight_budget_gib = budget
+                    parser = argparse.ArgumentParser()
+                    vm.add_arguments(parser)
+                    child = parser.parse_args(job.vm_options(args))
+                    self.assertEqual(core.digest({"budget": child.gpu_weight_budget_gib}),
+                                     core.digest({"budget": budget}))
+                    self.assertEqual("--gpu_weight_budget_gib" in job.vm_options(args),
+                                     type(budget) is float)
+
     def test_vm_full_executes_exact_grid_and_cpu_analysis(self):
         with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
             args, data = self.fixture(directory, "full")
