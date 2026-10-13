@@ -51,6 +51,23 @@ def canonical(candidate, fingerprint):
         for condition in CONDITIONS}
 
 
+def source_stage_manifest_field(value):
+    schema = value.get("schema")
+    if schema == "phase3c_mechanistic_pilot_v1":
+        complete = value.get("passed") is True and value.get("artifact_type") == "real"
+        field = "task_manifest_sha256"
+    elif schema == "phase3c_budget_followup_v1":
+        complete = value.get("complete") is True
+        field = "manifest_sha256"
+    else:
+        raise ValueError("Unsupported source checkpoint schema.")
+    if (not complete or value.get("failures") != [] or value.get("missing_task_ids") != [] or
+            type(value.get("expected")) is not int or value["expected"] <= 0 or
+            value.get("completed") != value["expected"] or not value.get(field)):
+        raise ValueError("Source technical/patch stage is incomplete.")
+    return field
+
+
 def source_artifacts(root, group, baseline_stage, table_name):
     root = Path(root).resolve()
     summary = read_json(root / "analysis/aggregate_summary.json")
@@ -89,9 +106,8 @@ def source_artifacts(root, group, baseline_stage, table_name):
     for stage in ("preflight", "patch"):
         summary_path = root / stage / "summary.json"
         value = read_json(summary_path)
-        if (value.get("complete") is not True or value.get("failures") or value.get("missing_task_ids")):
-            raise ValueError("Source technical/patch stage is incomplete.")
-        for name, field in (("rows.jsonl", "rows_sha256"), ("task_manifest.jsonl", "manifest_sha256")):
+        manifest_field = source_stage_manifest_field(value)
+        for name, field in (("rows.jsonl", "rows_sha256"), ("task_manifest.jsonl", manifest_field)):
             path = root / stage / name
             if file_hash(path) != value[field]:
                 raise ValueError("Source task ledger bytes changed.")

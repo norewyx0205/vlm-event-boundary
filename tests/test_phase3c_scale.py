@@ -50,6 +50,19 @@ class ScaleProtocolTest(unittest.TestCase):
         self.assertGreater(estimate["required_free_bytes"], estimate["new_capture_upper_bytes"] * 2)
         self.assertEqual(estimate["safety_reserve_bytes"], 12 * 1024**3)
 
+    def test_source_stage_schemas_require_positive_exact_completion(self):
+        common = {"expected": 2, "completed": 2, "failures": [], "missing_task_ids": []}
+        pilot = {**common, "schema": "phase3c_mechanistic_pilot_v1", "artifact_type": "real",
+                 "passed": True, "task_manifest_sha256": "sha"}
+        replication = {**common, "schema": "phase3c_budget_followup_v1", "complete": True, "manifest_sha256": "sha"}
+        self.assertEqual(protocol.source_stage_manifest_field(pilot), "task_manifest_sha256")
+        self.assertEqual(protocol.source_stage_manifest_field(replication), "manifest_sha256")
+        for value in (pilot, replication):
+            for changed in ({"completed": 1}, {"failures": ["failed"]}, {"missing_task_ids": ["missing"]},
+                            {"schema": "unknown"}, {"complete": False, "passed": False}):
+                with self.assertRaises(ValueError):
+                    protocol.source_stage_manifest_field({**value, **changed})
+
 
 class CompactCaptureTest(unittest.TestCase):
     @classmethod
