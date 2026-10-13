@@ -1675,3 +1675,13 @@ Reporting separates previously/newly tested cases. Storage, verified backup,
 email and optional exclusive-VM Pause gates remain required for unattended
 execution. `plot_phase3c_comparison.py` generates reporting-only comparison
 figures without modifying checksummed source plots.
+
+The [every-four-layer + KO25 continuation](docs/phase3c_depth50.md) restores
+the full zero-based `0,4,...,32` depth grid across all 50 rescues, appending
+700 verified patches to the two-layer prefix instead of discarding its 200
+rows. `scripts/depth50/run_phase3c_scale.py` queues behind that immutable
+prefix, then expands attention blocking to 25 fixed rescue bases: the original
+ROI/matched-background grid plus an explicitly separate options-to-whole-event
+route. One final backup/email/Pause lifecycle covers both stages. The queue
+uses no GPU and prevents an intermediate whole-VM Pause through the existing
+research-process idle safeguard. Prior captures/results are never rewritten.
