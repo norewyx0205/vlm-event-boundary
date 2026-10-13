@@ -1665,3 +1665,13 @@ explicit confirmations. A frozen cohort is reused without rewriting its audit.
 `--verify` independently checks frozen/gate/capture provenance without loading
 a processor/model. Recorded progress alone is never presented as a verified
 scientific result. The historical notebooks and Phase 3B evidence stay unchanged.
+
+The isolated [50-rescue whole-Event-2 expansion](docs/phase3c_scale50.md) uses
+`run_phase3c_scale.py`: L16 primary, L12 comparison, both directions, no new
+ROI/knockout grid. It exactly replays the two earlier 8-rescue cohorts and
+captures only the two tested sites for the 34 remaining bases, preserving
+the old all-layer stores. All 100 baselines must pass before intervention.
+Reporting separates previously/newly tested cases. Storage, verified backup,
+email and optional exclusive-VM Pause gates remain required for unattended
+execution. `plot_phase3c_comparison.py` generates reporting-only comparison
+figures without modifying checksummed source plots.
