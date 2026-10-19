@@ -1697,8 +1697,12 @@ capture coverage without importing Torch or loading a model. Its isolated
 `analysis/phase3d/` outputs are metadata audits, not GPU gates, trained probes
 or new experimental results. The [implementation notes](docs/phase3d_implementation.md)
 describe compact all-layer capture primitives, explicit option spans, the
-resumable `run_phase3d_probes.py` CPU trainer and equal-weight KO50 task planner.
+resumable `run_phase3d_probes.py` CPU trainer and equal-weight KO50 execution.
 Probe fitting uses grouped nested validation, frozen numeric exports and
-separate shortcut/null controls. Live GPU capture/export, knockout reuse and
-unattended orchestration are still pending; no command here launches the VM or
-alters frozen Phase 3B/3C evidence.
+separate shortcut/null controls. The [VM runbook](docs/phase3d_vm.md) covers fresh
+option-view audits, real compact capture/export, optional semantic KO25 reuse,
+KO50 checkpoints, two-case preflight/full, tmux, storage reserves, verified
+backups, email and opt-in SURF Pause. Pooled option L20 remains primary;
+separate A/B mention/relation readouts and six decision layers are secondary.
+CPU/toy tests do not establish real Qwen3-VL readiness: live GPU preflight is
+still required. No tool automatically Resumes the VM or changes Phase 3B/3C.

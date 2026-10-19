@@ -4,11 +4,11 @@ Protocol date: 2026-10-19 (Europe/Amsterdam).
 This is a pre-specified follow-up informed by prior results, not formal
 preregistration or a new independently sampled rescue population.
 
-Status: approved scientific design; CPU metadata preparation, compact capture
-primitives, linear-probe fitting and KO50 task planning are implemented and
-unit-tested. The live GPU collection/export runner, KO50 reuse/execution and
-real-model technical gates remain pending. No scientific probe results or
-GPU-readiness claim follow from unit tests. No automatic VM launch.
+Status: CPU preparation, compact real-model capture/export execution, semantic
+KO50 reuse/verification, grouped probing and an opt-in detached lifecycle are
+implemented with CPU/toy tests. Actual Qwen3-VL GPU preflight is still pending;
+unit tests are not scientific results or proof of live GPU readiness. No VM
+is resumed or experiment launched automatically.
 
 Reference: Song, Paperno and Gatt, *Who Is Left of Whom? Tracing Spatial Evidence
 and Role Binding in Relative-Position Reasoning*, Sections 5-6:
@@ -47,6 +47,8 @@ Storage estimation, reserve checks, resumable per-task checkpoints, elapsed-time
 progress, verified full backup, email and explicitly authorized idle-checked
 SURF Pause are required before unattended GPU execution. Only verified source
 results can be reused; never rerun completed work merely to relabel provenance.
+Summary-only inherited KO rows lack the original condition/mask chain and must
+be recomputed, not silently upgraded into verified reuse.
 
 ## 2. Experiment A: Knockout50
 
@@ -109,6 +111,24 @@ feature is mean(literal T1/Event2 ROI) minus mean(literal T2/Event2 ROI).
 Require both groups to be nonempty and entirely within the matched Event-2
 support; insufficient support stops the run, not case dropping or silent ROI
 cropping. Preserve source counts/positions as geometry-shortcut diagnostics.
+
+Before new GPU capture, also specify separate A/B T1-minus-T2 mention means
+and separate A/B relation-word means at all 36 block outputs. Averaging across
+contradictory statements may attenuate information: poor pooled decoding alone
+does not establish absence of relation information in the options. The fixed
+secondary probe sites are these four option-specific features at L20 and
+decision positions at L16, L20, L24, L28, L32 and L35. They do not replace the
+pooled L20 primary or add any intervention location. Export 289 named vectors;
+the default CPU analysis fits 83 relation readouts plus 24 control/null jobs.
+Each feature is a separate linear probe, not a concatenated high-capacity
+readout or an outcome-selected pooling search.
+
+For option-specific probes, also re-express the frozen canonical prediction as
+truth of the actual A/B statement, accounting for its subject and permutation.
+Report class counts and the majority baseline. This is a diagnostic
+re-expression of the same held-out probe, not independent evidence or a new
+A/B correctness fit: the current 46-A/4-B distribution is unsuitable for an
+unqualified balanced five-fold statement-truth training claim.
 
 Descriptive layerwise readouts cover decoder block outputs 0-35. Record L16
 visual block input and block output explicitly. L16 input can be matched to
@@ -185,13 +205,13 @@ alone is not causal computation; paired score/margin changes do not prove
 mediation or a unique routing mechanism. L20 necessity would require separately
 approved mediation/path-specific intervention, outside this phase.
 
-Before GPU launch, finish and test: exact per-option token spans and source
-pooling against the live tokenizer; baseline and patch-conditioned compact
-capture/identity/replay/export gates; KO50 verified reuse/merge; independent
-analysis; storage/backup/lifecycle orchestration. See the implementation status
-and feature-store contract in `phase3d_implementation.md`. The CPU preparation
-below freezes only the audited metadata/fold inputs, not a launch-ready GPU
-protocol:
+Before full GPU execution, run and inspect the implemented two-case preflight:
+fresh contextual spans, source pooling, full-logit/first-token parity, exact
+source/identity replay, L16 timing and disabled real-mask no-op. Completion is
+reconstructed from task ledgers, not manually marked summary booleans. See
+`phase3d_vm.md` for stage/storage/backup/lifecycle commands. The separate CPU
+preparation below only audits metadata; preserve older preparation_v3 rather
+than rewriting its frozen protocol binding:
 
 ```bash
 python scripts/prepare_phase3d.py \
@@ -200,5 +220,5 @@ python scripts/prepare_phase3d.py \
   --source_capture_refs analysis/phase3c/depth50_ko25_results_20261014/prefix/run/source_capture_refs.json \
   --capture_root analysis/phase3c/depth50_ko25_results_20261014/prefix/run/captures \
   --capture_root analysis/phase3c/depth50_ko25_results_20261014/run/captures \
-  --output_dir analysis/phase3d/preparation_v3
+  --output_dir analysis/phase3d/preparation_v4
 ```

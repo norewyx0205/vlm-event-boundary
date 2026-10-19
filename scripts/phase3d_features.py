@@ -103,6 +103,7 @@ class CompactSites(ResidualSites):
         self.groups = {name: checked_positions(list(values), name, length) for name, values in groups.items()}
         required = {"source_t1", "source_t2", "whole_event2", "decision_position", "query_all"}
         required |= {f"option_{option}_t{target}" for option in ("A", "B") for target in (1, 2)}
+        required |= {f"option_{option}_relation" for option in ("A", "B")}
         if not required <= set(self.groups):
             raise ValueError("Incomplete compact capture groups.")
         visual = set(visual_positions)
@@ -173,6 +174,9 @@ class CompactSites(ResidualSites):
                 means["option_A_t2"]-means["option_B_t2"])/2
             result[f"decision:L{layer}_output"] = means["decision_position"]
             result[f"query:L{layer}_output"] = means["query_all"]
+            for option in ("A", "B"):
+                result[f"option_{option}_pair:L{layer}_output"] = means[f"option_{option}_t1"]-means[f"option_{option}_t2"]
+                result[f"option_{option}_relation:L{layer}_output"] = means[f"option_{option}_relation"]
         result["source_pair:L16_input"] = self.input16["source_t1"]-self.input16["source_t2"]
         return result
 

@@ -163,8 +163,35 @@ def prediction_metrics(predictions):
         labels = [row["probe_label"] for row in rows]
         result.append({"view": view, "condition": condition,
                        "base_count": len({row["base_sample_id"] for row in rows}), "condition_rows": len(rows),
-                       "balanced_accuracy": float(balanced_accuracy_score(labels, [row["probe_prediction"] for row in rows])),
+                       "class_counts": {str(key): value for key, value in Counter(labels).items()},
+                       "majority_accuracy": max(Counter(labels).values())/len(labels),
+                       "balanced_accuracy": (float(balanced_accuracy_score(labels, [row["probe_prediction"] for row in rows]))
+                                             if len(set(labels)) == 2 else None),
+                       "accuracy": float(np.mean(np.asarray(labels) == [row["probe_prediction"] for row in rows])),
                        "log_loss": float(log_loss(labels, [row["probe_probability"] for row in rows], labels=[0, 1]))})
+    return result
+
+
+def statement_truth_predictions(predictions, cases, option):
+    """Express held-out canonical-relation predictions as actual statement truth.
+
+    This is a diagnostic re-expression of the same frozen probe, not another
+    independent accuracy result or a probe fitted on the imbalanced A/B label.
+    """
+    lookup = {case["base_sample_id"]: case for case in cases}
+    result = []
+    for row in predictions:
+        semantics = lookup[row["base_sample_id"]]["option_semantics"]
+        key = ("B" if option == "A" else "A") if row["view"] == "option_order_permuted" else option
+        statement = semantics[key]
+        before = (statement["relation"] == "before") == (statement["subject_id"] == 1)
+        score = row["probe_logit"] * (1 if before else -1)
+        probability = row["probe_probability"] if before else 1-row["probe_probability"]
+        result.append({**row, "probe_target": "statement_truth", "option": option,
+                       "canonical_probe_label": row["probe_label"], "canonical_probe_logit": row["probe_logit"],
+                       "probe_label": int(row["y"] == int(before)), "probe_logit": score,
+                       "probe_prediction": int(score > 0), "probe_probability": probability,
+                       "true_relation_evidence": None})
     return result
 
 

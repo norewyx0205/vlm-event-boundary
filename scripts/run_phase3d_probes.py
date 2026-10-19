@@ -28,6 +28,9 @@ DATASET_SCHEMA = "phase3d_feature_dataset_v1"
 GATES = ("processor_input_parity", "standard_first_token_parity", "full_logit_parity",
          "capture_noop", "source_state_replay", "identity_patch", "same_block_timing",
          "new_option_order_input_audit", "one_to_one_full_visual_support")
+DEFAULT_READOUTS = [f"{kind}:L{layer}_output" for kind in ("source_pair", "option_pair") for layer in range(36)]
+DEFAULT_READOUTS += ["source_pair:L16_input"] + [f"decision:L{layer}_output" for layer in (16, 20, 24, 28, 32, 35)]
+DEFAULT_READOUTS += [f"option_{option}_{kind}:L20_output" for option in ("A", "B") for kind in ("pair", "relation")]
 
 
 def resource(root, spec):
@@ -73,7 +76,7 @@ def load_dataset(manifest_path):
     if any(type(row.get("answer_margin")) not in (int, float) or not np.isfinite(row["answer_margin"]) for row in rows):
         raise ValueError("Every view/patch needs its actually measured answer margin.")
     names = manifest["feature_names"]
-    pattern = re.compile(r"(?:source_pair|option_pair|decision|query):L(?:[0-9]|[12][0-9]|3[0-5])_output$")
+    pattern = re.compile(r"(?:source_pair|option_pair|decision|query|option_[AB]_(?:pair|relation)):L(?:[0-9]|[12][0-9]|3[0-5])_output$")
     if len(set(names)) != len(names) or any(not pattern.fullmatch(name) and name != "source_pair:L16_input" for name in names):
         raise ValueError("Invalid or duplicate layer/site feature name.")
     with np.load(resource(root, manifest["features"]), allow_pickle=False) as payload:
@@ -126,7 +129,7 @@ def saved_result(root, fingerprint):
     return result
 
 
-def write_result(root, result, fingerprint, settings, readout_name="unspecified"):
+def write_result(root, result, fingerprint, settings, readout_name="unspecified", case_metadata=None):
     root.mkdir(parents=True, exist_ok=True)
     files, records = [], []
     for record in result["models"]:
@@ -147,6 +150,18 @@ def write_result(root, result, fingerprint, settings, readout_name="unspecified"
                "readout_name": readout_name, "is_primary_readout": readout_name == settings["primary_feature"],
                "held_out_metrics": prediction_metrics(result["predictions"])}
     if result["target"] == "relation" and not result["label_permutation"]:
+        separate_option = re.fullmatch(r"option_([AB])_(?:pair|relation):L\d+_output", readout_name)
+        if separate_option and case_metadata is not None:
+            try:
+                from .phase3d_probes import statement_truth_predictions
+            except ImportError:
+                from phase3d_probes import statement_truth_predictions
+            truth = statement_truth_predictions(result["predictions"], case_metadata, separate_option[1])
+            atomic_write(root/"statement_truth_predictions.json", truth)
+            files.append("statement_truth_predictions.json")
+            summary["statement_truth_diagnostic"] = {
+                "held_out_metrics": prediction_metrics(truth),
+                "interpretation": "Same frozen canonical-relation probe re-expressed using actual option semantics; not independent evidence or an A/B-label fit."}
         evidence = case_evidence(result["predictions"])
         atomic_write(root/"case_evidence.json", evidence)
         files.append("case_evidence.json")
@@ -158,7 +173,7 @@ def write_result(root, result, fingerprint, settings, readout_name="unspecified"
             x = np.asarray([row["delta_S_temporal_to_low_L16"] for row in transfer])
             y = np.asarray([row["delta_M_temporal_to_low_L16"] for row in transfer])
             rho = float(spearmanr(x, y).statistic) if np.ptp(x) > 0 and np.ptp(y) > 0 else None
-            downstream = re.fullmatch(r"(?:option_pair|decision|query):L(\d+)_output", readout_name)
+            downstream = re.fullmatch(r"(?:option_pair|decision|query|option_[AB]_(?:pair|relation)):L(\d+)_output", readout_name)
             summary["patch_associated_evidence"] = {
                 **bootstrap_mean(x, settings["seed"], settings["bootstrap_replicates"]),
                 "unpatched_downstream_text_readout": bool(downstream and int(downstream[1]) > 16),
@@ -172,9 +187,7 @@ def _run(args):
     manifest_path = Path(args.manifest_path).resolve()
     manifest, rows, cases, folds, names, features = load_dataset(manifest_path)
     settings = dict(SETTINGS)
-    default_names = [f"{kind}:L{layer}_output" for kind in ("source_pair", "option_pair") for layer in range(36)]
-    default_names += ["source_pair:L16_input", "decision:L35_output"]
-    selected = args.feature_names or default_names
+    selected = args.feature_names or DEFAULT_READOUTS
     if len(set(selected)) != len(selected) or not set(selected) <= set(names) or settings["primary_feature"] not in selected:
         raise ValueError("Need the fixed L20 primary readout and every requested named feature.")
     root = Path(args.output_dir).resolve()
@@ -213,7 +226,7 @@ def _run(args):
             def progress(message):
                 print(f"  {name}: {message}; elapsed {(time.perf_counter()-started)/60:.1f} min", flush=True)
             result = crossfit(rows, values, cases, folds, settings, target, categorical, permutation, progress)
-            summary = write_result(destination, result, fingerprint, settings, readout_name=name)
+            summary = write_result(destination, result, fingerprint, settings, readout_name=name, case_metadata=cases)
         outputs[name] = {"result_path": str(destination.relative_to(root)/"result.json"),
                          "sha256": file_hash(destination/"result.json")}
         print(f"Phase 3D probes {index}/{len(jobs)}: {name}; elapsed "
@@ -248,7 +261,80 @@ def run(args):
     if root == manifest.parent or root in manifest.parents or manifest.parent in root.parents:
         raise ValueError("Use an isolated probe root, outside the immutable feature store.")
     with probe_lock(root):
-        return _run(args)
+        return verify_outputs(root, manifest) if getattr(args, "verify_only", False) else _run(args)
+
+
+def verify_outputs(root, manifest_path):
+    """Check every expected job against the actual dataset and held-out folds."""
+    root, manifest_path = Path(root).resolve(), Path(manifest_path).resolve()
+    _, rows, cases, folds, names, values = load_dataset(manifest_path)
+    config, summary = read_json(root/"run_config.json"), read_json(root/"aggregate_summary.json")
+    if (config.get("fingerprint") != digest({k: v for k, v in config.items() if k != "fingerprint"}) or
+            config["manifest_sha256"] != file_hash(manifest_path) or config["settings"] != SETTINGS or
+            config["protocol_sha256"] != file_hash(Path(__file__).resolve().parents[1]/"docs/phase3d_protocol.md") or
+            any(file_hash(Path(__file__).with_name(name)) != sha for name, sha in config["code_sha256"].items()) or
+            summary.get("complete") is not True or summary.get("fingerprint") != config["fingerprint"]):
+        raise ValueError("Probe summary/configuration/dataset binding changed.")
+    selected = config["feature_names"]
+    if (len(set(selected)) != len(selected) or not set(selected) <= set(names) or SETTINGS["primary_feature"] not in selected):
+        raise ValueError("Invalid frozen relation readout list.")
+    jobs = [(name, "relation", None) for name in selected]
+    jobs += [("condition__"+name, "condition", None) for name in ("source_pair:L16_output", "option_pair:L20_output")]
+    jobs += [(name, "relation", None) for name in ("static_attributes", "option_lexical")]
+    for permutation in range(SETTINGS["label_permutations"]):
+        shuffled = np.random.default_rng(SETTINGS["seed"]+1000+permutation).permutation([c["y"] for c in cases])
+        labels = {case["base_sample_id"]: int(label) for case, label in zip(cases, shuffled)}
+        jobs.append((f"label_permutation_{permutation:03d}", "relation", labels))
+    if set(summary["results"]) != {name for name, _, _ in jobs}:
+        raise ValueError("Missing or foreign relation/control/null result.")
+    key = lambda row: (row["base_sample_id"], row["condition"], row["view"], row["intervention"])
+    expected_rows = {key(row): (index, row) for index, row in enumerate(rows)}
+    base_fold = {base: f"outer_{fold['outer_fold']}" for fold in folds for base in fold["test_base_ids"]}
+    expected_models = {f"outer_{fold['outer_fold']}": fold for fold in folds}
+    for count, (name, target, permutation) in enumerate(jobs, 1):
+        directory = root/name.replace(":", "__")
+        ref = summary["results"][name]
+        if (ref["result_path"] != str(directory.relative_to(root)/"result.json") or
+                file_hash(directory/"result.json") != ref["sha256"]):
+            raise ValueError("Misbound or altered per-readout result resource.")
+        result = saved_result(directory, digest([config["fingerprint"], name, permutation]))
+        if result is None or result["readout_name"] != name or result["target"] != target or result["label_permutation"] != (permutation is not None):
+            raise ValueError("Readout/target/permutation identity differs from its requested job.")
+        models = read_json(directory/"models.json")
+        if len(models) != len(folds) or {m["model_id"] for m in models} != set(expected_models):
+            raise ValueError("Missing/duplicate outer-fold model.")
+        for model in models:
+            fold = expected_models[model["model_id"]]
+            if (model["train_base_ids"] != fold["train_base_ids"] or model["test_base_ids"] != fold["test_base_ids"] or
+                    model["chosen_C"] not in SETTINGS["C_grid"]):
+                raise ValueError("Exported model does not bind the held-out fold/C grid.")
+        predictions = read_json(directory/"held_out_predictions.json")
+        if len(predictions) != len(rows) or {key(p) for p in predictions} != set(expected_rows):
+            raise ValueError("Incomplete/duplicated held-out observation grid.")
+        for prediction in predictions:
+            _, original = expected_rows[key(prediction)]
+            if any(prediction.get(field) != value for field, value in original.items()):
+                raise ValueError("Held-out prediction refers to a different input/condition/intervention.")
+            label = (int(original["condition"] == "temporal_boundary") if target == "condition" else
+                     permutation[original["base_sample_id"]] if permutation is not None else original["y"])
+            if (prediction["probe_label"] != label or prediction["probe_target"] != target or
+                    prediction["model_id"] != base_fold[original["base_sample_id"]] or
+                    prediction["probe_prediction"] != int(prediction["probe_logit"] > 0)):
+                raise ValueError("Prediction uses a foreign label, target or non-held-out model.")
+        # Numeric exports must reproduce all saved held-out logits without refitting.
+        numeric = None if name in ("static_attributes", "option_lexical") else (
+            SETTINGS["primary_feature"] if permutation is not None else name.removeprefix("condition__"))
+        if numeric is not None:
+            feature = values[:, names.index(numeric), :]
+            for model in models:
+                subset = [p for p in predictions if p["model_id"] == model["model_id"]]
+                indices = [expected_rows[key(p)][0] for p in subset]
+                logits = frozen_numeric_scores(directory/(model["model_id"]+".npz"), feature[indices])
+                if not np.allclose(logits, [p["probe_logit"] for p in subset], atol=1e-10, rtol=1e-10):
+                    raise ValueError("Exported numeric probe does not reproduce held-out logits.")
+        if count % 10 == 0 or count == len(jobs):
+            print(f"Phase 3D CPU verification: {count}/{len(jobs)} readouts/controls", flush=True)
+    return summary
 
 
 def main():
@@ -256,6 +342,7 @@ def main():
     parser.add_argument("--manifest_path", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--feature_names", nargs="+")
+    parser.add_argument("--verify_only", action="store_true", help="Verify complete probes and numeric held-out replay without refitting.")
     run(parser.parse_args())
 
 

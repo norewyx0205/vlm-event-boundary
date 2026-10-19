@@ -193,8 +193,26 @@ class LinearProbeTest(unittest.TestCase):
                 result = runner.run(args)
                 self.assertEqual(len(result["results"]), 6)
                 self.assertEqual(result["base_count"], 50)
+                self.assertEqual(result, runner.verify_outputs(root/"probes", manifest))
                 with patch.object(runner, "crossfit", side_effect=AssertionError("Completed fits must be reused")):
                     self.assertEqual(result, runner.run(args))
+                summary_path = root/"probes/aggregate_summary.json"
+                altered = copy.deepcopy(result)
+                altered["results"].pop("option_pair:L20_output")
+                atomic_write(summary_path, altered)
+                with self.assertRaisesRegex(ValueError, "Missing"):
+                    runner.verify_outputs(root/"probes", manifest)
+
+    def test_separate_option_truth_diagnostic_tracks_subject_and_permutation(self):
+        rows, values, cases, folds = fixture()
+        result = probes.crossfit(rows, values, cases, folds, SETTINGS)
+        for option, expected in (("A", 1), ("B", 0)):
+            converted = probes.statement_truth_predictions(result["predictions"], cases, option)
+            original = [row for row in converted if row["view"] == "archived"]
+            permuted = [row for row in converted if row["view"] == "option_order_permuted"]
+            self.assertEqual({row["probe_label"] for row in original}, {expected})
+            self.assertEqual({row["probe_label"] for row in permuted}, {1-expected})
+            self.assertTrue(all(row["canonical_probe_label"] in (0, 1) for row in converted))
 
 
 class Knockout50Test(unittest.TestCase):

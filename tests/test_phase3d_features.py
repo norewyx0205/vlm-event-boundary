@@ -44,8 +44,8 @@ class CompactCaptureTest(unittest.TestCase):
 
     def groups(self):
         return {"source_t1": [1], "source_t2": [2], "whole_event2": [1, 2],
-                "option_A_t1": [3], "option_A_t2": [4], "option_B_t1": [3],
-                "option_B_t2": [4], "query_all": [0], "decision_position": [5]}
+                "option_A_t1": [3], "option_A_t2": [4], "option_B_t1": [3], "option_B_t2": [4],
+                "option_A_relation": [3], "option_B_relation": [4], "query_all": [0], "decision_position": [5]}
 
     def capture(self, model, inputs, patch=None):
         controller = CompactSites(model, 6, [1, 2], self.groups(), patch)
@@ -59,7 +59,7 @@ class CompactCaptureTest(unittest.TestCase):
         plain = model(*inputs)
         controller, observed = self.capture(model, inputs)
         self.assertTrue(torch.equal(plain, observed))
-        self.assertEqual(len(controller.feature_views()), 145)
+        self.assertEqual(len(controller.feature_views()), 289)
         self.assertTrue(torch.equal(controller.input16["source_t1"], controller.means[15]["source_t1"]))
         self.assertEqual(controller.donor16["layer"], 16)
         self.assertFalse(controller.states)
