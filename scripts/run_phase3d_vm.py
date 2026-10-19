@@ -425,6 +425,13 @@ def launch_command(args):
     return command
 
 
+def normalize_paths(args):
+    for name in ("output_root", "storage_root", "project_root", "backup_dir"):
+        setattr(args, name, str(Path(getattr(args, name)).expanduser().resolve()))
+    # Resolving a venv's Python symlink selects the base interpreter, losing its packages.
+    args.probe_python = os.path.abspath(os.path.expanduser(args.probe_python))
+
+
 def main():
     from scripts.phase3b_email import DEFAULT_CONFIG as EMAIL_CONFIG
     from scripts.surf_workspace import DEFAULT_CONFIG as SURF_CONFIG
@@ -449,8 +456,7 @@ def main():
     parser.add_argument("--surf_config", default=SURF_CONFIG)
     parser.add_argument("--confirm_exclusive_workspace", action="store_true")
     args = parser.parse_args()
-    for name in ("output_root", "storage_root", "project_root", "backup_dir", "probe_python"):
-        setattr(args, name, str(Path(getattr(args, name)).expanduser().resolve()))
+    normalize_paths(args)
     if (not Path(args.storage_root).is_dir() or not Path(args.output_root).is_relative_to(args.storage_root) or
             not Path(args.backup_dir).is_relative_to(args.storage_root) or
             Path(args.backup_dir).is_relative_to(args.output_root) or Path(args.output_root).is_relative_to(args.backup_dir)):

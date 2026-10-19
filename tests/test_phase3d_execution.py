@@ -505,6 +505,24 @@ class ToyExecutorTest(unittest.TestCase):
 
 
 class LifecycleTest(unittest.TestCase):
+    def test_path_normalization_preserves_venv_interpreter_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            base_python = root / "system_python"
+            base_python.touch()
+            venv_python = root / "venv" / "bin" / "python"
+            venv_python.parent.mkdir(parents=True)
+            venv_python.symlink_to(base_python)
+            args = SimpleNamespace(output_root=str(root / "run"), storage_root=str(root),
+                project_root=str(root), backup_dir=str(root / "backups"), probe_python=str(venv_python),
+                gpus="0,1", attempt_id="test", retry_failed=False)
+            vm.normalize_paths(args)
+            self.assertEqual(args.probe_python, str(venv_python.absolute()))
+            self.assertNotEqual(args.probe_python, str(venv_python.resolve()))
+            command = vm.child_command(args, "preflight")
+            self.assertEqual(command[command.index("--probe_python") + 1], str(venv_python.absolute()))
+            self.assertEqual(vm.probe_command(args)[0], str(venv_python.absolute()))
+
     def exercise(self, code=0, backup_ok=True, idle_failure=False, stale_attempt=False):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)

@@ -33,7 +33,9 @@ metadata differences alone do not authorize a numerically different replay.
 The GPU environment also needs NumPy/SciPy/scikit-learn for export verification.
 Fitting can use `--probe_python /absolute/path/to/cpu/python`. Dependencies are
 checked before preflight/full; no packages are automatically upgraded. Preserve
-the pinned inference dependencies when preparing a CPU environment.
+the pinned inference dependencies when preparing a CPU environment. Interpreter
+paths preserve virtual-environment symlinks; resolving them to the system Python
+would bypass the environment's installed packages.
 
 ## Two-Case Preflight
 
