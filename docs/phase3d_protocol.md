@@ -4,10 +4,11 @@ Protocol date: 2026-10-19 (Europe/Amsterdam).
 This is a pre-specified follow-up informed by prior results, not formal
 preregistration or a new independently sampled rescue population.
 
-Status: approved scientific design, CPU metadata preparation implemented. The
-new GPU runner, feature extraction, probe fitting and live technical gates are
-not implemented or validated by this document. A metadata audit is not a passed
-preflight, trained probe or experimental result. No automatic VM launch.
+Status: approved scientific design; CPU metadata preparation, compact capture
+primitives, linear-probe fitting and KO50 task planning are implemented and
+unit-tested. The live GPU collection/export runner, KO50 reuse/execution and
+real-model technical gates remain pending. No scientific probe results or
+GPU-readiness claim follow from unit tests. No automatic VM launch.
 
 Reference: Song, Paperno and Gatt, *Who Is Left of Whom? Tracing Spatial Evidence
 and Role Binding in Relative-Position Reasoning*, Sections 5-6:
@@ -89,10 +90,13 @@ robustness evaluation, not an extra training example in the primary analysis.
 Freeze five relation-stratified outer folds, seed 42, at **base** level. Every
 condition, prompt view, token group and patched version of a base stays in its
 outer test fold. Fit scalers/centering and any feature transforms using training
-bases only. Select L2 strength inside grouped inner training folds only; pin
-solver, tolerances, class weighting and the candidate strength grid before GPU
-outcomes or fitting. Do not tune by outer-test accuracy, boundary gain or patch
-effect. No PCA or alternative pooling selected by test performance.
+bases only. Select L2 strength inside four grouped inner training folds only:
+`C = 0.001, 0.01, 0.1, 1.0`; ties favor the smallest C. Use liblinear/L2/dual,
+class-weight balanced, tolerance 1e-7 and max_iter 10000. Convergence warnings
+stop fitting. Each paired training condition gets sample weight 0.5. Record
+NumPy/scikit-learn/Python versions in the immutable run configuration. Do not
+tune by outer-test accuracy, boundary gain or patch effect. No PCA or
+alternative pooling selected by test performance.
 
 Primary downstream feature: for each literal identity, pool its mention tokens
 separately within A and B, give the two options equal weight, then take the
@@ -100,9 +104,11 @@ canonical T1-minus-T2 vector. Retain separate option/object token vectors so the
 pure permutation and lexical controls can be audited. Do not treat a probe that
 identifies the visible word 'before' versus 'after' as relational understanding.
 Keep decision-position and source-visual readouts separate; do not combine
-positions/layers into one high-capacity classifier. Freeze the analogous
-source pooling over literal target groups before live capture, including how
-empty or insufficient support blocks the run rather than dropping a case.
+positions/layers into one high-capacity classifier. The analogous source
+feature is mean(literal T1/Event2 ROI) minus mean(literal T2/Event2 ROI).
+Require both groups to be nonempty and entirely within the matched Event-2
+support; insufficient support stops the run, not case dropping or silent ROI
+cropping. Preserve source counts/positions as geometry-shortcut diagnostics.
 
 Descriptive layerwise readouts cover decoder block outputs 0-35. Record L16
 visual block input and block output explicitly. L16 input can be matched to
@@ -124,6 +130,8 @@ Required controls use the same base-level train/test separation:
 
 - Base-label permutation with all paired views permuted together and the
   fitting procedure repeated; never shuffle individual token/condition rows.
+  Run 20 fixed-seed permutations at the primary L20 readout as null diagnostics,
+  not a high-resolution confirmatory permutation test.
 - A separate condition-only probe; successful condition decoding is not
   evidence of relation decoding.
 - Static object-feature and text-only/lexical/answer-position baselines. Fit
@@ -178,10 +186,12 @@ mediation or a unique routing mechanism. L20 necessity would require separately
 approved mediation/path-specific intervention, outside this phase.
 
 Before GPU launch, finish and test: exact per-option token spans and source
-pooling; solver/inner-fold specification; baseline and patch-conditioned compact
-capture/identity/replay gates; KO50 verified reuse/merge; independent analysis;
-storage/backup/lifecycle orchestration. The CPU preparation below freezes only
-the audited metadata/fold inputs, not a launch-ready GPU protocol:
+pooling against the live tokenizer; baseline and patch-conditioned compact
+capture/identity/replay/export gates; KO50 verified reuse/merge; independent
+analysis; storage/backup/lifecycle orchestration. See the implementation status
+and feature-store contract in `phase3d_implementation.md`. The CPU preparation
+below freezes only the audited metadata/fold inputs, not a launch-ready GPU
+protocol:
 
 ```bash
 python scripts/prepare_phase3d.py \
@@ -190,5 +200,5 @@ python scripts/prepare_phase3d.py \
   --source_capture_refs analysis/phase3c/depth50_ko25_results_20261014/prefix/run/source_capture_refs.json \
   --capture_root analysis/phase3c/depth50_ko25_results_20261014/prefix/run/captures \
   --capture_root analysis/phase3c/depth50_ko25_results_20261014/run/captures \
-  --output_dir analysis/phase3d/preparation_v2
+  --output_dir analysis/phase3d/preparation_v3
 ```

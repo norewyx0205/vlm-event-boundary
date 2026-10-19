@@ -1695,6 +1695,10 @@ audits canonical timing-derived T1/T2 labels, creates grouped outer folds and
 explicit pure A/B-permutation control descriptors, and inventories candidate
 capture coverage without importing Torch or loading a model. Its isolated
 `analysis/phase3d/` outputs are metadata audits, not GPU gates, trained probes
-or new experimental results. GPU orchestration and probe fitting are still
-pending; updating/running this CPU preparation does not launch the VM or alter
-the frozen Phase 3B/3C evidence.
+or new experimental results. The [implementation notes](docs/phase3d_implementation.md)
+describe compact all-layer capture primitives, explicit option spans, the
+resumable `run_phase3d_probes.py` CPU trainer and equal-weight KO50 task planner.
+Probe fitting uses grouped nested validation, frozen numeric exports and
+separate shortcut/null controls. Live GPU capture/export, knockout reuse and
+unattended orchestration are still pending; no command here launches the VM or
+alters frozen Phase 3B/3C evidence.
