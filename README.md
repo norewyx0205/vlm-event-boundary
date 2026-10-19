@@ -1685,3 +1685,16 @@ ROI/matched-background grid plus an explicitly separate options-to-whole-event
 route. One final backup/email/Pause lifecycle covers both stages. The queue
 uses no GPU and prevents an intermediate whole-VM Pause through the existing
 research-process idle safeguard. Prior captures/results are never rewritten.
+
+### Phase 3D Design and CPU Preparation
+
+The [Phase 3D protocol](docs/phase3d_protocol.md) specifies equal-weight Knockout50,
+held-out linear temporal-relation probing and L16 visual-patch-conditioned
+downstream readouts (L20 primary, L17-L24 propagation). `prepare_phase3d.py`
+audits canonical timing-derived T1/T2 labels, creates grouped outer folds and
+explicit pure A/B-permutation control descriptors, and inventories candidate
+capture coverage without importing Torch or loading a model. Its isolated
+`analysis/phase3d/` outputs are metadata audits, not GPU gates, trained probes
+or new experimental results. GPU orchestration and probe fitting are still
+pending; updating/running this CPU preparation does not launch the VM or alter
+the frozen Phase 3B/3C evidence.
