@@ -2,6 +2,14 @@
 
 ## Frozen Scope
 
+This is an **exploratory, same-cohort mechanistic localization follow-up**.
+Blocks 16-19 were selected because the completed four-layer profile showed
+strong sensitivity there on these same cases. Fixing the singleton grid before
+its execution does not make that layer selection independent or confirmatory.
+A strong singleton effect establishes localized causal sensitivity of the
+tested route, not "the temporal-order computation layer". Reports, figures and
+machine-readable plan/summary metadata retain this qualification.
+
 This supplement decomposes the existing **options_all -> whole_event2**
 four-block attention knockout, using the **same 50 independent rescue bases**,
 archived prompts, low/temporal conditions, and 512-position matched visual

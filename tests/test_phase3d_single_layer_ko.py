@@ -153,6 +153,8 @@ class SourceAndAnalysisTest(unittest.TestCase):
             before = {str(p.relative_to(source)): file_hash(p) for p in source.rglob("*") if p.is_file()}
             with patch.object(ex, "load_context", return_value=old):
                 context = followup.freeze_plan(source, root)
+                self.assertEqual(context[0]["analysis_status"], "exploratory_same_cohort_followup")
+                self.assertEqual(context[0]["layer_selection_rationale"], followup.LAYER_SELECTION)
                 self.assertEqual(context, followup.load_context(root))
                 self.assertEqual(context, followup.freeze_plan(source, root))
                 complete_singletons(root, context)
@@ -161,6 +163,11 @@ class SourceAndAnalysisTest(unittest.TestCase):
                     summary = followup.analyze(root, context)
                 self.assertEqual(summary["new_condition_rows"], 400)
                 self.assertEqual(summary["paired_rows_with_reference"], 250)
+                self.assertEqual(summary["analysis_status"], "exploratory_same_cohort_followup")
+                self.assertEqual(summary["layer_selection_rationale"], followup.LAYER_SELECTION)
+                report = (root/"analysis/report.md").read_text()
+                self.assertIn("Exploratory same-cohort", report)
+                self.assertIn(followup.LAYER_SELECTION, report)
                 cells = read_json(root/"analysis/aggregate_cells.json")
                 self.assertEqual(len(cells), 5)
                 self.assertEqual({cell["case_count"] for cell in cells}, {50})

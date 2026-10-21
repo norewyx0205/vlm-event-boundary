@@ -12,6 +12,9 @@ from .phase3c_interventions import AttentionKnockout
 from .run_phase3c_preflight import logits_parity, save_tensors
 
 SCHEMA = "phase3d_single_layer_ko_v1"
+ANALYSIS_STATUS = "exploratory_same_cohort_followup"
+LAYER_SELECTION = ("Layers 16-19 were selected from the previously observed joint-knockout peak on the same cohort; "
+                   "this is not independent confirmatory localization.")
 LAYERS = (16, 17, 18, 19)
 ROUTE = {"query_group": "options_all", "key_group": "whole_event2", "control": "whole_event_reference"}
 METRICS = ("delta_M_temporal", "delta_M_low", "compression", "advantage_base", "advantage_KO")
@@ -204,6 +207,7 @@ def freeze_plan(source, output):
             ("source_records.json", "pairs.json", "mappings.json", "source_plan.json", "source_runtime.json", "source_logits.pt")},
         "layers": list(LAYERS), "route": ROUTE, "new_condition_forwards": 400,
         "joint_reference_condition_rows": 100, "technical_forwards_included_in_400": False,
+        "analysis_status": ANALYSIS_STATUS, "layer_selection_rationale": LAYER_SELECTION,
         "case_reporting": "All 50 original bases equally; no pilot/new stratification.",
         "interpretation": "Singleton versus joint dependence; not a unique circuit or additive decomposition."}
     plan["fingerprint"] = digest(plan)
@@ -216,7 +220,8 @@ def load_context(root):
     plan = read_json(root / "plan.json")
     if (plan.get("schema") != SCHEMA or plan.get("artifact_type") != "real" or
             plan.get("fingerprint") != digest({k: v for k, v in plan.items() if k != "fingerprint"}) or
-            plan["code_sha256"] != code_hashes() or plan["layers"] != list(LAYERS) or plan["route"] != ROUTE):
+            plan["code_sha256"] != code_hashes() or plan["layers"] != list(LAYERS) or plan["route"] != ROUTE or
+            plan.get("analysis_status") != ANALYSIS_STATUS or plan.get("layer_selection_rationale") != LAYER_SELECTION):
         raise ValueError("Follow-up plan/code/protocol changed; use a new root.")
     source_context = execution.load_context(plan["source_root"])
     if source_context[0]["fingerprint"] != plan["source_plan_fingerprint"]:
@@ -392,6 +397,8 @@ def analyze(root, context, plots=True):
         frozen_write(output / f"{name}.json", values)
         write_csv(output / f"{name}.csv", values)
     text = ["# Single-Layer Event-2 Attention Knockout", "",
+        "Exploratory same-cohort mechanistic localization follow-up.", LAYER_SELECTION,
+        "A concentrated effect indicates localized causal sensitivity of the tested route, not the temporal-order computation layer.", "",
         "All 50 frozen rescue bases have equal weight. Blocks are zero-based: L16 is the 17th decoder block.",
         "400 new interventional condition forwards; technical baseline/no-op forwards are additional.",
         "The four-layer joint intervention is a verified historical reference, not a new measurement.", "",
@@ -415,6 +422,7 @@ def analyze(root, context, plots=True):
         "plan_fingerprint": context[0]["fingerprint"], "base_count": 50, "new_condition_rows": 400,
         "baseline_gate_rows": 100, "joint_reference_condition_rows": 100, "paired_rows_with_reference": 250,
         "missing_count": 0, "source_plan_fingerprint": context[0]["source_plan_fingerprint"],
+        "analysis_status": ANALYSIS_STATUS, "layer_selection_rationale": LAYER_SELECTION,
         "output_sha256": {p.name: file_hash(p) for p in sorted(output.iterdir()) if p.is_file() and p.name != "aggregate_summary.json"}}
     atomic_write(output / "aggregate_summary.json", summary)
     return summary
@@ -425,7 +433,7 @@ def plot(cells, path):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     cells = sorted(cells, key=lambda r: (r["layer_count"], r["window_start"]))
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4.5), constrained_layout=True)
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4.8), constrained_layout=True)
     for ax, metric, title in zip(axes, METRICS[:3], ("Temporal margin change", "Low margin change", "Boundary-gap compression")):
         for i, cell in enumerate(cells):
             mean = cell[metric+"_mean"]
@@ -435,7 +443,8 @@ def plot(cells, path):
         ax.axhline(0, color="#555555", linewidth=.8)
         ax.set(title=title, xticks=range(5), xticklabels=["L16", "L17", "L18", "L19", "L16-19\njoint ref."],
                ylabel="Correct-option logit-margin change")
-    fig.suptitle("Options -> whole Event 2: singleton versus joint attention knockout | 50 paired rescue bases")
-    fig.supxlabel("95% case-bootstrap intervals. Joint reference cuts four times as many layer-edges; not an additive decomposition.", fontsize=9)
+    fig.suptitle("Exploratory single-layer attention knockout | 50 paired rescue bases\nOptions -> whole matched Event 2")
+    fig.supxlabel("Layers selected from the observed L16-19 peak on these same cases; diagnostic 95% case-bootstrap intervals.\n"
+                  "Joint reference cuts four times as many layer-edges; not an additive decomposition.", fontsize=9)
     fig.savefig(path, dpi=180)
     plt.close(fig)
