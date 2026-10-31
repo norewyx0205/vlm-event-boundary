@@ -20,6 +20,7 @@ data/phase3b_rescue_pool/
 analysis/phase3b/
 analysis/phase3c/
 analysis/phase3d/
+analysis/phase3e/
 
 # Generated legacy video datasets
 synthetic_boundary_videos/videos/
