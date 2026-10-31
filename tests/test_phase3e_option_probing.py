@@ -291,10 +291,9 @@ class CaptureRunnerTest(unittest.TestCase):
                 patch("scripts.backup_phase3b.verify_backup", return_value={"schema": "phase3e_paired_option_backup_v1",
                     "source_run_root": str(Path(directory).resolve())}), \
                 patch.object(capture_runner, "verify", return_value={}), \
-                patch.object(capture_runner.subprocess, "run") as command, \
+                patch("scripts.run_phase3e_paired_unattended.assert_idle", side_effect=RuntimeError("GPU compute remains active")), \
                 patch("scripts.surf_workspace.SurfClient") as surf, \
                 patch("scripts.phase3b_email.EmailNotifier") as email:
-            command.return_value.stdout = "12345\n"
             with self.assertRaisesRegex(RuntimeError, "GPU compute"):
                 capture_runner.finish(directory, "unused")
             surf.assert_not_called()

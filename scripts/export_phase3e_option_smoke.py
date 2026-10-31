@@ -21,7 +21,7 @@ from scripts.phase3c_core import atomic_write, digest, file_hash
 from scripts.phase3e_option_features import (READOUTS, archived_readouts, audit_paired_readouts,
     from_preflight_payload, statement_features)
 from scripts.phase3e_paired_design import labels_and_pairs, validate_materials
-from scripts.phase3e_preflight import AttentionSites
+from scripts.phase3e_preflight import AttentionSites, LEGACY_SCHEMA
 from scripts.run_phase3c_preflight import logits_parity
 from scripts.run_phase3d_probes import save_npz
 
@@ -55,7 +55,7 @@ def run(backup_dir, output_root):
                 config["plan_fingerprint"] != plan["fingerprint"]):
             raise ValueError("Archived preflight plan/config changed.")
         seeds = sorted({r["scene_seed"] for r in plan["rows"]})
-        validate_materials(plan["rows"], seeds)
+        validate_materials(plan["rows"], seeds, legacy_absolute=plan.get("schema") == LEGACY_SCHEMA)
         original = json_("processor_audit.json")["records"]
         mappings, captured = {}, {}
         for row in plan["rows"]:

@@ -65,6 +65,58 @@ class PreflightTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 core.audit_factorial(changed)
 
+    def test_event_relative_distractors_keep_identity_path_duration_and_slot(self):
+        scenes, rows = core.factorial_rows("/tmp/unused_phase3e")
+        self.assertTrue(all("motion" not in d for s in scenes for d in s["distractors"]))
+        self.assertTrue(all(d.get("motion_timing") == "near_targets" for s in scenes for d in s["distractors"]
+                            if d["motion_kind"] != "static"))
+        for row in rows:
+            rendered = {d["id"]: d for d in row["render_distractors"]}
+            for dist in row["distractors"]:
+                motion = rendered[dist["id"]]["motion"]
+                self.assertTrue(all(dist[k] == v for k, v in motion.items()))
+                if dist["motion_kind"] == "static":
+                    self.assertEqual((dist["start_frame"], dist["end_frame"]), (0, 0))
+                    continue
+                slot = "first" if dist["id"] % 2 == 0 else "second"
+                self.assertEqual(dist["start_frame"], row["event_timing"][slot+"_event_start_frame"])
+                self.assertEqual(dist["end_frame"], row["event_timing"][slot+"_event_end_frame"])
+                self.assertEqual(dist["end_frame"]-dist["start_frame"], 30)
+
+    def test_low_timing_cannot_leak_into_temporal_and_slot_swap_rejected(self):
+        _, rows = core.factorial_rows("/tmp/unused_phase3e")
+        for kind in ("fixed_low", "swap_slots", "one_frame_shift"):
+            changed = copy.deepcopy(rows)
+            for row in changed:
+                if row["condition"] != "temporal_boundary":
+                    continue
+                movers = [d for d in row["distractors"] if d["motion_kind"] != "static"]
+                if kind == "fixed_low":
+                    for dist in movers:
+                        start, end = core.generator.moving_distractor_window(dist, core.timing("low_boundary"))
+                        dist.update(start_frame=start, end_frame=end)
+                elif kind == "swap_slots":
+                    a, b = movers
+                    a["start_frame"], b["start_frame"] = b["start_frame"], a["start_frame"]
+                    a["end_frame"], b["end_frame"] = b["end_frame"], a["end_frame"]
+                else:
+                    movers[0]["start_frame"] += 1
+            with self.assertRaisesRegex(ValueError, "event-relative"):
+                core.audit_factorial(changed)
+
+    def test_legacy_absolute_annotations_require_explicit_read_only_validation(self):
+        _, rows = core.factorial_rows("/tmp/unused_phase3e")
+        for row in rows:
+            for dist in row["distractors"]:
+                if dist["motion_kind"] != "static":
+                    start, end = core.generator.moving_distractor_window(dist, core.timing("low_boundary"))
+                    dist.update(start_frame=start, end_frame=end)
+                dist.pop("motion_timing")
+        with self.assertRaises(ValueError):
+            core.audit_factorial(rows)
+        audit = core.audit_factorial(rows, legacy_absolute=True)
+        self.assertEqual(audit["distractor_schedule"], "absolute frames fixed within each scene across all variants")
+
     def test_actual_read_only_sites_and_cleanup(self):
         model = Text()
         values = torch.randn(1, 7, 4, dtype=torch.float16)

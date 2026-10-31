@@ -101,9 +101,17 @@ class PairedOptionDesignTest(unittest.TestCase):
             result = prepare(root)
             self.assertEqual(result["status"], "cpu_design_audit_passed")
             self.assertFalse(result["new_gpu_inference_performed"])
+            self.assertFalse(result["systematic_second_event_co_motion_change"])
+            self.assertEqual(design.SCHEMA, "phase3e_paired_option_design_v2")
             self.assertTrue((root / "order_pairs.jsonl").is_file())
             with self.assertRaises(ValueError):
                 prepare(root)
+
+    def test_old_design_version_cannot_launch_as_corrected_capture(self):
+        plan = copy.deepcopy(self.plan)
+        plan["schema"] = design.LEGACY_SCHEMA
+        with self.assertRaisesRegex(ValueError, "event-relative v2"):
+            design.validate_plan(plan)
 
 
 if __name__ == "__main__":

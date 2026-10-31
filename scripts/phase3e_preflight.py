@@ -19,7 +19,8 @@ from .phase3d_core import audit_row
 SEEDS = (2026102701, 2026102702)
 CONDITIONS = ("low_boundary", "temporal_boundary")
 LAYERS = (0, 16, 17, 18, 20)
-SCHEMA = "phase3e_two_scene_technical_preflight_v1"
+SCHEMA = "phase3e_two_scene_technical_preflight_v2"
+LEGACY_SCHEMA = "phase3e_two_scene_technical_preflight_v1"
 
 
 def scene(seed):
@@ -32,9 +33,7 @@ def scene(seed):
         one, two, _, occupied = generator.make_target_objects(level, 1, identity)
         distractors = generator.make_distractors(level, occupied, [one, two], 2, 2, False,
             static_count_override=2, moving_count_override=2)
-        low = timing(CONDITIONS[0])
-        return {"seed": seed, "targets": [one, two],
-                "distractors": generator.timed_distractors(distractors, low)}
+        return {"seed": seed, "targets": [one, two], "distractors": distractors}
     finally:
         random.setstate(state)
 
@@ -48,6 +47,7 @@ def factorial_rows(root, seeds=SEEDS):
     rows, scenes = [], [scene(seed) for seed in seeds]
     for item, first, condition in product(scenes, (1, 2), CONDITIONS):
         schedule = timing(condition)
+        scheduled_distractors = generator.timed_distractors(item["distractors"], schedule)
         objects, annotated = [], []
         for obj in item["targets"]:
             event = "first" if obj["id"] == first else "second"
@@ -63,11 +63,12 @@ def factorial_rows(root, seeds=SEEDS):
             "boundary_timing": {k: schedule[k] for k in ("boundary_start_frame", "boundary_end_frame")},
             "video_id": video_id, "video_path": str(root / "videos" / (video_id + ".mp4")),
             "geometry_sha256": digest(item), "render_objects": objects,
-            "render_distractors": item["distractors"]}
-        for dist in item["distractors"]:
+            "render_distractors": scheduled_distractors}
+        for dist in scheduled_distractors:
             base["distractors"].append({"id": dist["id"], "shape": dist["shape"],
                 "color": dist["color"], "label": f"the {dist['color']} {dist['shape']}",
                 "radius": dist.get("radius", 23), "motion_kind": dist["motion_kind"],
+                "motion_timing": dist.get("motion_timing", "none"),
                 **dist["motion"]})
         labels = {obj["id"]: obj["label"] for obj in annotated}
         for subject, layout in product((1, 2), ("before_first", "after_first")):
@@ -86,7 +87,7 @@ def factorial_rows(root, seeds=SEEDS):
     return scenes, rows
 
 
-def audit_factorial(rows, seeds=SEEDS):
+def audit_factorial(rows, seeds=SEEDS, *, legacy_absolute=False):
     expected = set(product(seeds, (1, 2), CONDITIONS, (1, 2), ("before_first", "after_first")))
     actual = [(r["scene_seed"], r["first_object_id"], r["condition"], r["subject_id"], r["layout"])
               for r in rows]
@@ -96,11 +97,39 @@ def audit_factorial(rows, seeds=SEEDS):
         subset = [r for r in rows if r["scene_seed"] == seed]
         if len({r["geometry_sha256"] for r in subset}) != 1:
             raise ValueError("Scene geometry changed between factorial variants.")
-        geometry = lambda r: [{k: v for k, v in obj.items() if k not in ("start_frame", "end_frame")}
-                              for obj in r["target_objects"]]
-        if any(geometry(r) != geometry(subset[0]) or r["distractors"] != subset[0]["distractors"] for r in subset):
-            raise ValueError("Static identities/paths or fixed absolute distractor schedule changed.")
+        geometry = lambda r, group: [{k: v for k, v in obj.items() if k not in ("start_frame", "end_frame")}
+                                    for obj in r[group]]
+        if any(geometry(r, group) != geometry(subset[0], group)
+               for r in subset for group in ("target_objects", "distractors")):
+            raise ValueError("Static identities/paths or distractor geometry changed.")
+        if legacy_absolute and any(r["distractors"] != subset[0]["distractors"] for r in subset):
+            raise ValueError("Legacy absolute distractor schedule changed.")
+        if not legacy_absolute and (Counter(d["motion_kind"] for d in subset[0]["distractors"]) !=
+                                   Counter({"static": 2, "unrelated_motion": 2})):
+            raise ValueError("Level-5 fixtures require two static and two moving distractors.")
         for r in subset:
+            if not legacy_absolute:
+                schedule = timing(r["condition"])
+                for dist in r["distractors"]:
+                    if dist["motion_kind"] == "static":
+                        expected_motion = generator.make_static_motion(dist["from"])
+                    else:
+                        if dist.get("motion_timing") != "near_targets":
+                            raise ValueError("Moving distractors must keep an event-relative near_targets slot.")
+                        start, end = generator.moving_distractor_window(dist, schedule)
+                        expected_motion = generator.make_motion(dist, start, end)
+                    if any(dist.get(k) != v for k, v in expected_motion.items()):
+                        raise ValueError("Distractor motion disagrees with its event-relative schedule.")
+                # Order reversal changes target roles, never the distractor event slots.
+                if any(q["distractors"] != r["distractors"] for q in subset if q["condition"] == r["condition"]):
+                    raise ValueError("Order/text variants changed the distractor schedule within a condition.")
+                if "render_distractors" in r:
+                    rendered = {d["id"]: d for d in r["render_distractors"]}
+                    if set(rendered) != {d["id"] for d in r["distractors"]} or any(
+                            any(d[k] != v for k, v in rendered[d["id"]]["motion"].items()) or
+                            any(d[k] != rendered[d["id"]][k] for k in ("shape", "color", "motion_kind"))
+                            for d in r["distractors"]):
+                        raise ValueError("Rendered distractor motion/identity differs from the annotation.")
             audit_row(r)
             other = next(q for q in subset if q["first_object_id"] == r["first_object_id"] and
                          q["condition"] == r["condition"] and q["subject_id"] == r["subject_id"] and
@@ -112,7 +141,8 @@ def audit_factorial(rows, seeds=SEEDS):
             "unique_videos": len({r["video_id"] for r in rows}),
             "correct_option_counts": dict(Counter(r["correct_option"] for r in rows)),
             "canonical_order_counts": dict(Counter(audit_row(r)["canonical_relation"] for r in rows)),
-            "distractor_schedule": "absolute frames fixed within each scene across all variants",
+            "distractor_schedule": ("absolute frames fixed within each scene across all variants" if legacy_absolute else
+                "event-relative near_targets slots; condition-specific timing; fixed within order/text variants"),
             "event2_mover_shortcut_eliminated": False}
 
 
@@ -176,10 +206,10 @@ def prepare(root):
 
 def load_plan(root):
     plan = read_json(Path(root) / "plan.json")
-    if plan.get("schema") != SCHEMA or plan.get("fingerprint") != digest(
+    if plan.get("schema") not in (SCHEMA, LEGACY_SCHEMA) or plan.get("fingerprint") != digest(
             {k: v for k, v in plan.items() if k != "fingerprint"}):
         raise ValueError("Changed preflight plan.")
-    audit_factorial(plan["rows"])
+    audit_factorial(plan["rows"], legacy_absolute=plan["schema"] == LEGACY_SCHEMA)
     for row in plan["rows"]:
         if file_hash(row["video_path"]) != plan["videos"][row["video_id"]]["sha256"]:
             raise ValueError("Frozen video bytes changed.")

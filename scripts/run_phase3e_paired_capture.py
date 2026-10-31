@@ -5,15 +5,16 @@ import gc
 import json
 import os
 import shutil
-import subprocess
 import sys
 from collections import Counter
+from contextlib import nullcontext
 from pathlib import Path
 
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import phase3e_paired_design as design
+from scripts.audit_phase3e_interactions import save as save_interactions
 from scripts.phase3c_core import MODEL, REVISION, atomic_write, digest, file_hash, frozen_write, read_json
 from scripts.phase3e_option_features import (CompactOptionSites, FEATURE_NAMES, audit_paired_readouts,
     option_readouts, statement_features)
@@ -48,9 +49,21 @@ def prepare(root):
     space(root)
     plan = design.build_plan(root)
     atomic_write(root / "plan.json", plan)
+    save_interactions(root, plan)
     rendered = design.render_examples(root, plan, count=40)
     atomic_write(root / "videos.json", rendered)
     return {"status": "cpu_materials_rendered", "videos": len(rendered["videos"]), "GPU_forwards": 0}
+
+
+def interaction_record(root, plan):
+    result = read_json(Path(root) / "interaction_audit.json")
+    if (result.get("status") != "cpu_material_audit_complete" or
+            result.get("event_relative_schedule_verified") is not True or
+            result.get("distractor_timing_policy") != "event_relative_near_targets" or
+            result.get("record_sha256") != digest({k: v for k, v in result.items() if k != "record_sha256"}) or
+            result.get("plan_fingerprint") != plan["fingerprint"] or result.get("rows_sha256") != digest(plan["rows"])):
+        raise ValueError("Interaction audit is missing, altered or belongs to another material plan.")
+    return result
 
 
 def check_videos(root, plan, rows):
@@ -65,9 +78,12 @@ def check_videos(root, plan, rows):
 
 def config_for(root, plan, source_plan=None):
     path = Path(root) / "capture_config.json"
+    interaction_record(root, plan)
+    audit_sha = file_hash(Path(root) / "interaction_audit.json")
     if source_plan is None:
         config = read_json(path)
-        if config["code_sha256"] != code_hashes() or config["plan_fingerprint"] != plan["fingerprint"]:
+        if (config["code_sha256"] != code_hashes() or config["plan_fingerprint"] != plan["fingerprint"] or
+                config.get("interaction_audit_sha256") != audit_sha):
             raise ValueError("Capture code or plan changed; preserve this run and use a new root.")
         return config
     source_plan = Path(source_plan).resolve()
@@ -76,6 +92,7 @@ def config_for(root, plan, source_plan=None):
         raise ValueError("Source settings differ from the frozen Qwen checkpoint/precision.")
     config = {"schema": SCHEMA, "plan_fingerprint": plan["fingerprint"],
         "settings": settings, "source_settings_plan_sha256": file_hash(source_plan),
+        "interaction_audit_sha256": audit_sha,
         "code_sha256": code_hashes(), "execution_mode": "model_parallel", "gpu_weight_budget_gib": 14,
         "feature_names": list(FEATURE_NAMES), "per_prompt_forwards": 3,
         "new_KO_forwards": 0, "new_patch_forwards": 0,
@@ -318,7 +335,7 @@ def public_files(root, reports_only=False):
     names = {"plan.json", "videos.json", "capture_config.json", "processor_audit_preflight.json",
         "processor_audit.json", "runtime.json", "preflight_summary.json", "capture_summary.json",
         "storage_projection.json", "verification.json", "failure.json",
-        "unattended_status.json", "unattended_job.log"}
+        "unattended_status.json", "unattended_job.log", "interaction_audit.json", "interaction_audit.md"}
     result = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
@@ -349,15 +366,14 @@ def finish(root, backup_dir):
     from scripts.backup_phase3b import verify_backup
     from scripts.phase3b_email import EmailNotifier, load_private_config as email_config, DEFAULT_CONFIG as EMAIL
     from scripts.surf_workspace import SurfClient, load_private_config as surf_config, DEFAULT_CONFIG as SURF
+    from scripts.run_phase3e_paired_unattended import assert_idle
     manifest = verify_backup(backup_dir)
     if manifest.get("schema") != "phase3e_paired_option_backup_v1" or manifest["source_run_root"] != str(Path(root).resolve()):
         raise ValueError("Finish requires this run's full verified backup.")
     summary = verify(root)
-    gpu = subprocess.run(["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader,nounits"],
-                         capture_output=True, text=True, check=True)
-    if gpu.stdout.strip():
-        raise RuntimeError("GPU compute remains active; refusing whole-VM Pause.")
-    receipt = {"full_capture_verified": True, "verified_backup": str(backup_dir), "gpu_quiescent": True}
+    assert_idle()
+    receipt = {"full_capture_verified": True, "verified_backup": str(backup_dir),
+               "gpu_quiescent": True, "workspace_quiescent": True, "pause_not_confirmed": True}
     body = (f"Phase 3E-B compact option capture VERIFIED\nScene families: 40; prompts: 640\nRun: {root}\n"
             f"Verified full VM backup: {backup_dir}\nNo new KO/patch. CPU probe fitting is a separate step.\n"
             "The next action is a SURF Pause request; this email does not confirm Pause/billing stop.\n")
@@ -368,6 +384,12 @@ def finish(root, backup_dir):
         receipt["email_error_type"] = type(exc).__name__
     path = Path(root).parent / (Path(root).name+"_completion.json")
     atomic_write(path, receipt)
+    try:
+        assert_idle()
+    except Exception as exc:
+        receipt.update(workspace_quiescent=False, pause_blocked=True, error_type=type(exc).__name__)
+        atomic_write(path, receipt)
+        raise
     receipt["pause"] = SurfClient(surf_config(SURF, (root, backup_dir))).request_pause()
     atomic_write(path, receipt)
     return receipt
@@ -397,7 +419,8 @@ if __name__ == "__main__":
     if args.stage == "prepare":
         result = prepare(args.output_root)
     else:
-        with lock(Path(args.output_root), ".phase3e_option.lock"):
+        workspace = lock(args.storage_root, ".phase3e_workspace.lock") if args.stage == "finish" else nullcontext()
+        with workspace, lock(Path(args.output_root), ".phase3e_option.lock"):
             if args.stage in ("preflight", "capture"):
                 result = capture(args.output_root, args.source_plan, args.stage == "preflight")
             elif args.stage == "verify":

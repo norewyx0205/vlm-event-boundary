@@ -4,6 +4,13 @@ Authorized on 27 October 2026: implement and run a small technical preflight;
 send a completion email and pause the exclusive-use VM afterwards. This does
 not authorize the proposed 40-scene experiment.
 
+Version note, 31 October: the following frozen-scope description records the
+original v1 technical run. New preparations use v2 event-relative distractor
+timing: untimed scene geometry, then `timed_distractors` for the current boundary.
+The original v1 videos/captures are preserved and readable as legacy technical
+data. The corrected 40-family paired-option protocol requires a new preflight
+on corrected videos; the old checkpoints cannot be reused for it.
+
 ## Frozen Scope
 
 Two fresh deterministic scene seeds, 2026102701 and 2026102702, each have both

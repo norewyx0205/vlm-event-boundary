@@ -10,7 +10,8 @@ from . import phase3e_preflight as fixture
 from .phase3c_core import digest
 from .phase3d_core import audit_row, statement
 
-SCHEMA = "phase3e_paired_option_design_v1"
+SCHEMA = "phase3e_paired_option_design_v2"
+LEGACY_SCHEMA = "phase3e_paired_option_design_v1"
 SCENE_SEEDS = tuple(range(2026103101, 2026103141))
 PRIMARY_LAYERS = (16, 17, 18)
 REFERENCE_LAYERS = (0, 20)
@@ -86,8 +87,8 @@ def labels_and_pairs(rows):
     return examples, order_pairs, boundary_pairs
 
 
-def validate_materials(rows, seeds):
-    original = fixture.audit_factorial(rows, seeds)
+def validate_materials(rows, seeds, *, legacy_absolute=False):
+    original = fixture.audit_factorial(rows, seeds, legacy_absolute=legacy_absolute)
     lexical = defaultdict(Counter)
     lookup = {(r["scene_seed"], r["first_object_id"], r["condition"], r["subject_id"], r["layout"]): r
               for r in rows}
@@ -124,9 +125,12 @@ def validate_materials(rows, seeds):
         "second_event_mover_is_valid_task_evidence": True}
 
 
-def validate_plan(plan):
+def validate_plan(plan, *, allow_legacy=False):
+    legacy = plan.get("schema") == LEGACY_SCHEMA
+    if plan.get("schema") != SCHEMA and not (allow_legacy and legacy):
+        raise ValueError("Formal capture requires the event-relative v2 design; preserve older material plans.")
     rows, seeds = plan["rows"], plan["scene_seeds"]
-    audit = validate_materials(rows, seeds)
+    audit = validate_materials(rows, seeds, legacy_absolute=legacy)
     examples, pairs, boundaries = labels_and_pairs(rows)
     if (plan["material_audit"] != audit or plan["statement_examples"] != examples or
             plan["order_pairs"] != pairs or plan["boundary_pairs"] != boundaries):
@@ -190,16 +194,21 @@ def render_examples(root, plan, count=2):
     """Render the first fixed families, never replace them based on behaviour."""
     seeds = tuple(plan["scene_seeds"][:count])
     _, render_rows = fixture.factorial_rows(root, seeds)
+    planned = {r["video_id"]: r for r in plan["rows"]}
     seen, audits = set(), []
     for row in render_rows:
         if row["video_id"] in seen:
             continue
         seen.add(row["video_id"])
+        keys = ("target_objects", "distractors", "event_timing", "video_path")
+        if digest({k: row[k] for k in keys}) != digest({k: planned[row["video_id"]][k] for k in keys}):
+            raise ValueError("Regenerated render specification differs from the frozen video plan.")
         path = Path(row["video_path"])
         path.parent.mkdir(parents=True, exist_ok=True)
         fixture.generator.render_video(path, row["condition"], row["fps"], row["duration_sec"],
             row["render_objects"], row["render_distractors"], row["event_timing"])
         audits.append({"video_id": row["video_id"], "scene_seed": row["scene_seed"],
                        "path": str(path), **fixture.video_audit(path)})
+        print(f"CPU_VIDEO {len(audits)}/{4*len(seeds)} {row['video_id']}", flush=True)
     return {"status": "cpu_render_only", "scene_seeds": list(seeds), "videos": audits,
             "model_forward_count": 0}

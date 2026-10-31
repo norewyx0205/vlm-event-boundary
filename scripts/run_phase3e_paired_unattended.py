@@ -75,8 +75,9 @@ def assert_idle():
     if gpu.stdout.strip():
         raise RuntimeError("GPU compute remains active; launch/Pause blocked.")
     processes = subprocess.run(["ps", "-eo", "pid=,args="], capture_output=True, text=True, check=True, timeout=30)
-    pattern = re.compile(r"(?:^|[ /])(?:run_phase3e_paired_capture|run_phase3e_paired_unattended|"
-                         r"run_phase3e_preflight|run_phase3e_option_probes|prepare_phase3e_paired_design)\.py(?:\s|$)")
+    pattern = re.compile(r"(?:^|[ /])(?:scripts\.)?(?:run_phase3e_paired_capture|run_phase3e_paired_unattended|"
+                         r"run_phase3e_preflight|run_phase3e_option_probes|prepare_phase3e_paired_design|"
+                         r"audit_phase3e_interactions)(?:\.py)?(?:\s|$)")
     for line in processes.stdout.splitlines():
         parts = line.strip().split(maxsplit=1)
         if len(parts) != 2 or int(parts[0]) == os.getpid() or not pattern.search(parts[1]):

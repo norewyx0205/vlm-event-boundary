@@ -8,6 +8,8 @@
 - Current scope: normal-forward option-side probing on matched order-reversal videos.
 - Replaces: the old cross-object D feature as the main input and the earlier proposal
   to make KO-conditioned probing a required new experiment.
+- Material version: v2 uses condition-specific, event-relative distractor timing;
+  the earlier fixed-absolute v1 plans and videos remain unchanged.
 - Existing Phase 3B-3E-A results and the 27 October preflight remain frozen.
 
 ## Research Question
@@ -26,7 +28,11 @@ Use 40 fresh scene families, fixed seeds 2026103101 through 2026103140, without
 behavioural screening. T1 and T2 are persistent object IDs, not first/second mover.
 Keep each object's shape, colour, initial position, direction and entire path
 fixed. Reverse only which target is scheduled in the first versus second event.
-Keep absolute distractor schedules fixed. This is **not** an appearance swap,
+Keep each distractor's identity, path and assigned event slot fixed. Schedule its
+motion using `timed_distractors(distractors, timing(condition))` for each video,
+so the second-slot distractor shifts with Event 2 in Temporal. Order reversal
+within one boundary condition leaves the distractor schedules unchanged.
+This is **not** an appearance swap,
 an annotation-only renaming, a spatial mirror or a query-role reversal.
 
 | Object identity | Video A example | Video B example |
@@ -45,6 +51,65 @@ The generator reuses the audited 18-second, 15-FPS, 512-by-512 level-5 fixture:
 two targets, two static and two moving distractors, two-second target events,
 zero/three-second gap. The same fixed identities also undergo both event orders,
 so appearance and fixed path alone cannot determine the relation label.
+
+### Event-Relative Distractor Audit
+
+`audit_phase3e_interactions.py` enumerates the 160 unique videos, rather than
+counting repeated prompt views as separate videos. For each of the 320 target
+events it records active distractor identities/frames, continuous centre
+distances and raster-footprint overlap with every distractor. Activity means a
+rendered centre changes from frame f to f+1, over start <= f < end. Shape overlap
+uses the actual generator drawing primitive, before video encoding.
+
+The initial 31 October audit of v1 found a systematic difference: Event-2
+co-motion was 80/80 in Low versus 0/80 in Temporal (100% to 0%, -100 percentage
+points). `scene()` had prematurely applied the Low schedule to distractors,
+which were then reused unchanged in Temporal. The v2 correction stores untimed
+scene geometry and applies the original Level-5 scheduling helper inside the
+condition loop. It does not add a condition, select new seeds or alter labels.
+
+The corrected 40-family metadata audit gives:
+
+| Target role | Low events with co-motion | Temporal events with co-motion | Change |
+| --- | ---: | ---: | ---: |
+| First | 80/80 (100%) | 80/80 (100%) | 0 percentage points |
+| Second | 80/80 (100%) | 80/80 (100%) | 0 percentage points |
+
+The first target event occupies frames 30-60 in both conditions; the second
+occupies 60-90 in Low and 105-135 in Temporal. Distractor 4 moves at 30-60 in
+both conditions; distractor 3 moves at 60-90 in Low and 105-135 in Temporal.
+Both moving distractors retain their paths, durations and event slots.
+
+Footprint overlap occurs in 1/80 events in each boundary-by-role group and its
+paired fraction does not change. For second events, mean minimum centre
+distance is 108.277 pixels in Low and 108.277 in Temporal (change 0.000).
+Within every same-target, same-order boundary pair, co-motion, active distractor
+identity, proximity and footprint-overlap measures are unchanged. Order
+reversal still changes which event slot a target occupies; its concurrent
+distractor can differ across those two slots.
+
+The audit enforces identical geometry across all family variants, identical
+schedules across order/text variants within a boundary, and exact per-distractor
+event-relative windows across boundaries. Rendered motion and annotations use
+the same scheduled specifications. These are stimulus controls; model/probe
+effects still require capture and fitting on the corrected materials.
+
+Preparation saves `interaction_audit.json` and `interaction_audit.md`; the
+capture configuration binds the JSON hash to this exact plan. Raw endpoints
+and within-family changes remain available for subsequent interpretation.
+Formal capture rejects v1 plans. Old two-scene captures can still be read as
+legacy technical data, but cannot supply checkpoints for corrected preflight.
+
+### Historical Annotation Check
+
+The local Level-5 ladder and four main feature-condition annotation files,
+plus their available 5 August feature-condition copies, were inspected without
+modification. Moving distractors have `motion_timing="near_targets"`, but lack
+saved `start_frame`/`end_frame` fields. Their actual historical co-motion cannot
+be verified from these annotations alone. The standard generator calls
+`timed_distractors` inside its condition loop, which differs from the v1 Phase-3E
+bug; that code path is not a substitute for checking historical video contents.
+No Part-1 behavioural result is revised by this annotation-only check.
 
 ## Primary Readout And Label
 
@@ -162,6 +227,8 @@ Reuse the existing email, verified full-backup and quiescent-Pause lifecycle.
 
 - `phase3e_paired_design.py` and `prepare_phase3e_paired_design.py`: fixed
   materials, labels, contrasts and scene folds.
+- `audit_phase3e_interactions.py`: CPU target/distractor co-motion, identity,
+  proximity and exact footprint audit, including same-target raw paired levels.
 - `phase3e_option_features.py`: contextual reference-last, reference-mean and
   option-final readouts; compact normal-forward hooks. Raw residual timing
   proofs retain only reference-last and option-final positions, not entire

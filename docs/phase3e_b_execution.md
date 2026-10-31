@@ -9,8 +9,9 @@
 
 ## Data Flow
 
-1. Generate the fixed 40-family materials without behavioural screening.
-2. Audit actual processor spans and run the first two families (32 prompts).
+1. Generate the corrected v2 40-family materials without behavioural screening.
+2. Review the CPU target/distractor interaction audit; audit actual processor
+   spans and run the first two families (32 prompts).
 3. Check exact capture/no-hook logits, independent greedy parity, L17/L18
    residual arithmetic, paired reference-token alignment and video tensor budgets.
 4. Measure compact output bytes and require room for all captures, the feature
@@ -32,13 +33,59 @@ confirmation, a verified full snapshot and quiescence. A failed backup or a
 remaining worker blocks Pause and sends an attention message. SMTP failure
 alone does not prevent Pause after the other gates pass.
 
+## CPU Interaction Audit
+
+Both material preparation commands now emit `interaction_audit.json` and
+`interaction_audit.md`. To audit an existing plan without changing it or
+rendering video:
+
+```bash
+python scripts/audit_phase3e_interactions.py \
+  --plan_path /absolute/path/to/plan.json \
+  --output_root /absolute/path/to/new_interaction_audit
+```
+
+The audit deduplicates prompt views, records actual co-motion frames and
+distractor identities, and measures shape-footprint overlap and centre distance.
+Paired changes retain both raw levels and average within scene family first.
+Capture validates the audit's plan/row hashes and binds its file hash in the
+frozen configuration. Use a newly prepared root; do not retrofit or overwrite
+an old frozen capture configuration.
+
+The original v1 audit found second-event co-motion in 80/80 Low events versus
+0/80 Temporal events (100% to 0%, -100 percentage points). The corrected v2
+generator schedules distractors per boundary condition using the original
+Level-5 `near_targets` helper. The same fixed 40 families now give 80/80 in both
+conditions (100% to 100%, 0 percentage points). Identity, path, duration and
+event-slot matching are enforced; within a boundary, reversing target order
+does not change the distractor schedule.
+
+Use a new root such as `paired_option_event_relative_v2`, never overwrite v1
+videos/configurations. A v1 plan cannot launch formal capture, even if its own
+hash is valid. Re-render all 160 videos, audit decoded frames and bytes, and run
+the 32-prompt compact preflight on those corrected videos before full capture.
+The primary probe and 640-prompt design are unchanged.
+
+For a read-only historical annotation check:
+
+```bash
+python scripts/audit_phase3e_interactions.py \
+  --historical_annotations /path/to/L5_full/annotations.jsonl \
+  --output_root /absolute/path/to/new_historical_audit
+```
+
+Missing saved moving-distractor windows are reported as unknown, not filled in
+from current generator settings. Available Part-1 annotations record
+`near_targets` but not those windows; verifying historical rendered timing
+would require the corresponding videos.
+
 ## VM Stages
 
 Use a new run directory, outside all historical results. `SOURCE_PLAN` is an
 existing checked plan carrying the frozen Qwen revision/runtime/sampling settings.
 
 ```bash
-ROOT=/data/yuxuanstorage/vlm_phase3e/paired_option_v1
+ROOT=/data/yuxuanstorage/vlm_phase3e/paired_option_event_relative_v2
 STORAGE=/data/yuxuanstorage
 SOURCE_PLAN=/absolute/path/to/frozen_runtime/plan.json
 BACKUPS=/data/yuxuanstorage/backups
@@ -100,6 +147,10 @@ python scripts/run_phase3e_paired_capture.py --stage finish \
 ```
 
 `finish` requests Pause, but final portal state/billing stop must still be checked.
+It uses the same GPU/CPU research-worker idle guard as the detached lifecycle,
+both before notification and immediately before Pause. Its CLI takes the shared
+workspace lock before the run lock. A worker detected after email blocks Pause
+and is recorded in the completion receipt.
 Do not call `finish` after the detached lifecycle; that job already handles
 notification and Pause. Lifecycle packages use schema
 `phase3e_paired_option_job_backup_v1`; individual-stage packages use
@@ -139,11 +190,18 @@ applying a scaler offset or classifier intercept to D.
 
 ## Local Verification
 
-The complete regression suite passes 95 tests (79 feature/probe/previous tests
-and 16 lifecycle tests). Lifecycle tests use real temporary ZIP packages and
+The local regression suite passes 112 tests, including event-relative interaction
+audits, feature/probe tests and lifecycle tests. Lifecycle tests use real temporary
+ZIP packages and
 checksum verification; model execution, email and SURF calls are mocked. They
 cover success, partial failure, stale backup rejection, failed packaging,
-quiescence, SMTP failure, tmux launch and exclusive-workspace confirmation.
+quiescence, CPU workers with no GPU compute, workers starting during notification,
+SMTP failure, tmux launch and exclusive-workspace confirmation. Interaction tests
+cover all fixed families, end-exclusive motion intervals, exact shape overlap
+including canvas clipping, unchanged input metadata and audit tamper detection.
+Timing tests reject fixed-Low windows in Temporal, swapped distractor slots and
+off-by-one motion windows. Historical checks distinguish missing windows from
+observed zero co-motion. Legacy validation is read-only and explicit.
 No VM/GPU job was started by these local tests.
 
 The old two-scene backup can be exported without starting the VM:

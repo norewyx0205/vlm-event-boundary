@@ -1,5 +1,6 @@
 import copy
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -216,6 +217,43 @@ class LifecycleTest(unittest.TestCase):
         (project / "scripts/sample.py").write_text("raise RuntimeError()\n")
         with self.assertRaisesRegex(ValueError, "snapshot"):
             runner.snapshot_code(args)
+
+    def test_shared_idle_guard_rejects_cpu_workers_with_no_gpu_compute(self):
+        for cmd in ("python scripts/run_phase3e_option_probes.py --output_root /tmp/out",
+                    "python -m scripts.run_phase3e_option_probes --output_root /tmp/out",
+                    "python scripts/audit_phase3e_interactions.py --output_root /tmp/out"):
+            with patch("scripts.run_phase3d_single_layer_ko.assert_idle"), \
+                    patch.object(runner.subprocess, "run", side_effect=[SimpleNamespace(stdout=""),
+                        SimpleNamespace(stdout=f"{os.getpid()+100} {cmd}\n")]), \
+                    patch.object(runner.os, "readlink", return_value="/usr/bin/python3"):
+                with self.assertRaisesRegex(RuntimeError, "Another Phase 3E process"):
+                    runner.assert_idle()
+
+    def test_standalone_finish_reuses_shared_guard_and_rejects_cpu_task(self):
+        with patch("scripts.backup_phase3b.verify_backup", return_value={"schema": "phase3e_paired_option_backup_v1",
+                    "source_run_root": self.args.output_root}), patch.object(capture, "verify", return_value={}), \
+                patch.object(runner, "assert_idle", side_effect=RuntimeError("CPU task active")), \
+                patch("scripts.phase3b_email.EmailNotifier") as email, patch("scripts.surf_workspace.SurfClient") as surf:
+            with self.assertRaisesRegex(RuntimeError, "CPU task"):
+                capture.finish(self.root, self.args.backup_dir)
+            email.assert_not_called()
+            surf.assert_not_called()
+
+    def test_standalone_rechecks_cpu_idle_after_email_and_records_blocked_pause(self):
+        with patch("scripts.backup_phase3b.verify_backup", return_value={"schema": "phase3e_paired_option_backup_v1",
+                    "source_run_root": self.args.output_root}), patch.object(capture, "verify", return_value={}), \
+                patch.object(runner, "assert_idle", side_effect=[None, RuntimeError("CPU task started")]), \
+                patch("scripts.phase3b_email.load_private_config", return_value={}), \
+                patch("scripts.phase3b_email.EmailNotifier") as email, patch("scripts.surf_workspace.SurfClient") as surf:
+            email.return_value.send.return_value = {"sent": True}
+            with self.assertRaisesRegex(RuntimeError, "CPU task started"):
+                capture.finish(self.root, self.args.backup_dir)
+            email.return_value.send.assert_called_once()
+            surf.assert_not_called()
+            receipt = read_json(self.root.parent / (self.root.name+"_completion.json"))
+            self.assertTrue(receipt["pause_blocked"])
+            self.assertFalse(receipt["workspace_quiescent"])
+            self.assertTrue(receipt["pause_not_confirmed"])
 
 
 if __name__ == "__main__":

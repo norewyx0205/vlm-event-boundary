@@ -9,6 +9,7 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts import phase3e_paired_design as design
+from scripts.audit_phase3e_interactions import save as save_interactions
 from scripts.phase3c_core import atomic_write, file_hash
 
 
@@ -26,6 +27,7 @@ def prepare(root, render_families=0):
     atomic_write(root / "order_pairs.jsonl", plan["order_pairs"], jsonl=True)
     atomic_write(root / "boundary_pairs.jsonl", plan["boundary_pairs"], jsonl=True)
     atomic_write(root / "scene_folds.json", plan["folds"])
+    interactions = save_interactions(root, plan)
     rendered = design.render_examples(root, plan, render_families) if render_families else {
         "status": "not_requested", "videos": [], "model_forward_count": 0}
     atomic_write(root / "render_audit.json", rendered)
@@ -33,9 +35,12 @@ def prepare(root, render_families=0):
         "plan_fingerprint": plan["fingerprint"], "counts": plan["counts"],
         "rendered_example_videos": len(rendered["videos"]),
         "material_audit": design.validate_plan(plan), "new_ko_scheduled": False,
+        "interaction_audit_sha256": file_hash(root / "interaction_audit.json"),
+        "systematic_second_event_co_motion_change": interactions["systematic_second_event_co_motion_change"],
         "new_gpu_inference_performed": False,
         "code_sha256": {Path(source).name: file_hash(source) for source in
             (__file__, design.__file__, design.fixture.__file__, design.fixture.generator.__file__,
+             Path(__file__).with_name("audit_phase3e_interactions.py"),
              Path(design.__file__).with_name("phase3d_core.py"),
              Path(design.__file__).with_name("phase3c_core.py"))}}
     atomic_write(root / "summary.json", summary)
