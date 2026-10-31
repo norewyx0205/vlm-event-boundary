@@ -317,7 +317,8 @@ def public_files(root, reports_only=False):
     allowed = {"videos", "captures", "checkpoints", "feature_store", "logs", "code_snapshot"}
     names = {"plan.json", "videos.json", "capture_config.json", "processor_audit_preflight.json",
         "processor_audit.json", "runtime.json", "preflight_summary.json", "capture_summary.json",
-        "storage_projection.json", "verification.json", "failure.json"}
+        "storage_projection.json", "verification.json", "failure.json",
+        "unattended_status.json", "unattended_job.log"}
     result = {}
     for path in sorted(root.rglob("*")):
         if path.is_symlink():
@@ -338,7 +339,7 @@ def package(root, backup_dir):
     load_store(Path(root) / "feature_store/manifest.json")
     atomic_write(Path(root) / "verification.json", summary)
     space(root, RESERVE+int(1.1*sum(p.stat().st_size for p in public_files(root).values())))
-    bundle = create_backup(root, backup_dir, file_provider=public_files, bundle_prefix="phase3e_backup",
+    bundle = create_backup(root, backup_dir, file_provider=public_files, bundle_prefix="phase3c_backup",
         metadata={"schema": "phase3e_paired_option_backup_v1", "capture_plan_fingerprint": summary["plan_fingerprint"]})
     verify_backup(bundle)
     return {"backup_directory": str(bundle), "verified_on_VM": True}

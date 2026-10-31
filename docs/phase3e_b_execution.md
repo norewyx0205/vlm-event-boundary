@@ -20,11 +20,17 @@
 7. Package/verify captures and materials; send completion mail and request Pause.
 8. Fit and verify grouped CPU probes from the portable feature store locally.
 
-The commands below are individual stages, not an automatic detached launcher.
-Before unattended execution, arrange the existing tmux/notification lifecycle;
-do not leave a bare GPU command dependent on a browser terminal connection.
-The explicit `finish` stage sends a success-capture email only after a verified
-full backup and GPU-quiescence check. It does not send failure emails by itself.
+Use `run_phase3e_paired_unattended.py` for detached execution. It launches tmux,
+uses the persistent model caches and explicit GPU visibility, and runs each
+stage in a separate child process. Full launch requires a verified preflight;
+it does not start full capture automatically after the technical gate.
+
+Both successful and failed experiments produce a checksum-verified snapshot of
+all available public files, then a completion email. A failed run's snapshot is
+not a completed scientific result. Automatic Pause requires exclusive-workspace
+confirmation, a verified full snapshot and quiescence. A failed backup or a
+remaining worker blocks Pause and sends an attention message. SMTP failure
+alone does not prevent Pause after the other gates pass.
 
 ## VM Stages
 
@@ -40,6 +46,37 @@ BACKUPS=/data/yuxuanstorage/backups
 python scripts/run_phase3e_paired_capture.py --stage prepare \
   --output_root "$ROOT" --storage_root "$STORAGE"
 
+python scripts/run_phase3e_paired_unattended.py --action plan --stage preflight \
+  --output_root "$ROOT" --storage_root "$STORAGE" --source_plan "$SOURCE_PLAN" \
+  --backup_dir "$BACKUPS"
+
+python scripts/run_phase3e_paired_unattended.py --action launch --stage preflight \
+  --output_root "$ROOT" --storage_root "$STORAGE" --source_plan "$SOURCE_PLAN" \
+  --backup_dir "$BACKUPS" --gpus 0,1 --session_name phase3e-paired-preflight \
+  --email_notify --pause_after --confirm_exclusive_workspace
+```
+
+Review the new two-family technical result and storage projection before a
+separate full launch. If Pause was enabled, resume and confirm VM use first:
+
+```bash
+python scripts/run_phase3e_paired_unattended.py --action launch --stage full \
+  --output_root "$ROOT" --storage_root "$STORAGE" --source_plan "$SOURCE_PLAN" \
+  --backup_dir "$BACKUPS" --gpus 0,1 --session_name phase3e-paired-full \
+  --email_notify --pause_after --confirm_exclusive_workspace
+```
+
+Status and logs are in the sibling `<run>_lifecycle/job_status.json` and
+`job.log`. Code/protocol snapshots are included in the backup. Existing tmux
+sessions, another workspace job, active GPU compute, or changed capture code
+block a launch. No failed experiment is automatically retried.
+
+## Individual Stages
+
+These lower-level commands are for supervised operation/diagnostics. They do
+not provide failure notifications or automatic sequencing by themselves:
+
+```bash
 python scripts/run_phase3e_paired_capture.py --stage preflight \
   --output_root "$ROOT" --storage_root "$STORAGE" --source_plan "$SOURCE_PLAN"
 
@@ -63,6 +100,11 @@ python scripts/run_phase3e_paired_capture.py --stage finish \
 ```
 
 `finish` requests Pause, but final portal state/billing stop must still be checked.
+Do not call `finish` after the detached lifecycle; that job already handles
+notification and Pause. Lifecycle packages use schema
+`phase3e_paired_option_job_backup_v1`; individual-stage packages use
+`phase3e_paired_option_backup_v1`. Both use the existing supported
+`phase3c_backup_...` directory prefix, with their actual scope in the manifest.
 A failed gate preserves existing outputs, stops the stage and does not initiate
 another GPU experiment or delete files. An incomplete tensor without its
 committed checkpoint requires inspection; it is not silently overwritten.
@@ -96,6 +138,13 @@ non-A/B output. Direct contrasts are checked as `w dot (D / scale)` without
 applying a scaler offset or classifier intercept to D.
 
 ## Local Verification
+
+The complete regression suite passes 95 tests (79 feature/probe/previous tests
+and 16 lifecycle tests). Lifecycle tests use real temporary ZIP packages and
+checksum verification; model execution, email and SURF calls are mocked. They
+cover success, partial failure, stale backup rejection, failed packaging,
+quiescence, SMTP failure, tmux launch and exclusive-workspace confirmation.
+No VM/GPU job was started by these local tests.
 
 The old two-scene backup can be exported without starting the VM:
 

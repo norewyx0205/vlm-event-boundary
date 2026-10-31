@@ -169,6 +169,9 @@ Reuse the existing email, verified full-backup and quiescent-Pause lifecycle.
 - `run_phase3e_paired_capture.py`: explicit prepare/preflight/capture/verify/
   export/package/finish stages, input hashes, exact hook parity, generation
   parity, resumable checkpoints, measured disk budget and verified backup.
+- `run_phase3e_paired_unattended.py`: explicit tmux launch, successful/failed
+  attempt snapshots, completion email and quiescent Pause. Preflight and full
+  are separate launches; a technical pass does not start the full run.
 - `phase3e_option_store.py`: complete, real-capture-only training contract.
 - `phase3e_option_probes.py` and `run_phase3e_option_probes.py`: nested
   scene-family cross-fitting, lexical/static controls, numeric frozen-model
