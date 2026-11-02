@@ -275,8 +275,14 @@ def export(root):
     if values.shape != (800, len(LAYERS), 4096) or not np.array_equal(values[:, list(OLD_LAYERS)], four):
         raise ValueError("All-layer store does not reproduce the frozen v3 four-layer store.")
     destination = root/"feature_store"
+    if (destination/"manifest.json").exists():
+        # Idempotent: the lifecycle re-exports after its export child; accept only an identical store.
+        manifest, _, stored_endpoints, stored = load_store(destination/"manifest.json")
+        if stored_endpoints != endpoints or not np.array_equal(stored, values):
+            raise ValueError("Existing all-layer store differs from the verified captures.")
+        return manifest
     if destination.exists() and any(destination.iterdir()):
-        raise ValueError("Feature store already exists; inspect before exporting.")
+        raise ValueError("Partial feature store exists; inspect before exporting.")
     destination.mkdir()
     for name in ("endpoints.json", "preparation.json", "decisions.json"):
         shutil.copyfile(old_store/name, destination/name)
