@@ -21,6 +21,11 @@ analysis/phase3b/
 analysis/phase3c/
 analysis/phase3d/
 analysis/phase3e/
+analysis/phase3f/
+analysis/phase3g/
+
+# Local handoff notes (contain VM host details)
+docs/thesis_post_part1_handoff_*.md
 
 # Generated legacy video datasets
 synthetic_boundary_videos/videos/

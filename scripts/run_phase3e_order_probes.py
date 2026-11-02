@@ -123,7 +123,7 @@ def run(manifest_path, output_root, verify_only=False, settings=None):
         raise ValueError("Keep direct-D fitting separate from the immutable source store.")
     manifest, plan, rows, values, left, right = core.load_store(path)
     folds, selection = core.previous.folds_for(plan), core.selections(rows, plan)
-    settings = {**SETTINGS, **(settings or {})}
+    settings = {**SETTINGS, **(settings or {}), "training_unit": "direct_same_object_paired_order_difference"}
     repo = Path(__file__).resolve().parents[1]
     config = {"schema": core.SCHEMA, "manifest_sha256": file_hash(path), "settings": settings,
         "selection_sha256": digest(selection), "folds_sha256": digest(folds), "input": "D_order",

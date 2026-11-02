@@ -99,9 +99,10 @@ not a re-labelled version of old single-video decoding accuracy.
 
 ## Verification Record
 
-On 2 November 2026, 123 local Phase 3E regression tests passed. All 19 dedicated
+On 2 November 2026, 124 local Phase 3E regression tests passed. All 19 dedicated
 direct-D/material/capture/lifecycle tests also passed in the VM Python 3.12
-environment after the budget and input-audit fixes. These are engineering tests; actual model
+environment after the budget and input-audit fixes. The additional local test
+verifies the direct-D training-unit metadata and result replay. These are engineering tests; actual model
 preflight and capture
 status are recorded in the run's lifecycle JSON and raw checkpoints.
 Historical Phase 3B-3E artifacts and single-video controls remain unchanged.
@@ -130,4 +131,21 @@ read-only-hook no-op and standard-generation parity. The lifecycle then
 started full capture, reusing the eight preflight endpoints. The public proof
 and deployment record are under
 `analysis/phase3e/direct_difference_20261102/deployment_v3/`.
-This is not yet a completed 200-prompt capture or a direct-D probe result.
+V3 then completed all 200 reversed prompt captures, export and raw verification
+successfully. Its lifecycle took 3,581.985 seconds, including finishing work.
+A fresh post-run verification independently replayed all 200 checkpoints.
+The complete VM package `phase3c_backup_20261102_120340_428783` was downloaded
+and checksum-verified locally; it is approximately 470 MiB.
+
+Local CPU fitting and independent saved-model replay completed 80 outer models
+in `analysis/phase3e/direct_difference_20261102/probes_v2/`. The inherited
+`single_video` training-unit description was corrected to
+`direct_same_object_paired_order_difference`; all model arrays and statistics
+exactly matched the retained metadata-only predecessor `probes_v1/`.
+The actual features were D in both runs. No capture code or input was changed
+by this metadata correction.
+
+Main interpretation and the separate model-answer results are documented in
+`analysis/phase3e/direct_difference_20261102/analysis_notes.md`. The complete
+capture package, final CPU models, exact CPU source snapshot and figure are
+staged in `baidu_upload_staging_v1/`; a cloud upload is not yet confirmed.

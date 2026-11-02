@@ -109,6 +109,20 @@ class DirectDifferenceTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "order-reversal"):
                 core.load_store(path)
 
+    def test_run_labels_its_actual_difference_training_unit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root/"source/manifest.json"
+            atomic_write(manifest, {"synthetic": True})
+            loaded = ({"synthetic": True}, self.plan, self.rows, self.values, self.left, self.right)
+            with patch.object(core, "load_store", return_value=loaded):
+                result = runner.run(manifest, root/"probes", settings={**self.settings, "bootstrap_replicates": 2})
+                self.assertTrue(result["complete"])
+                self.assertEqual(read_json(root/"probes/config.json")["settings"]["training_unit"],
+                                 "direct_same_object_paired_order_difference")
+                self.assertEqual(result, runner.run(manifest, root/"probes", verify_only=True,
+                                                    settings={**self.settings, "bootstrap_replicates": 2}))
+
 
 class OrderMaterialsTest(unittest.TestCase):
     def test_reversal_keeps_paths_appearance_text_and_distractors(self):
