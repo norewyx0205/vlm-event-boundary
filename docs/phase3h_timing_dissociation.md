@@ -2,8 +2,8 @@
 
 ## Material Passport
 
-- Status: design decisions settled on 3 November 2026 (see Decisions). Not yet implemented;
-  no GPU work scheduled. The design, contrasts and reading rules below are fixed before
+- Status: design decisions settled on 3 November 2026 (see Decisions). Implemented the same day
+  (`docs/phase3h_timing_execution.md`); no GPU forward has been run. The design, contrasts and reading rules below are fixed before
   any Phase 3H material is rendered or any forward is run; results never edit this file.
 - Question: is the Temporal-boundary advantage caused by the inter-event gap itself, or
   by the later absolute position / greater recency of Event 2 that the gap also produces?
@@ -128,7 +128,7 @@ Wrong answers are kept. No video is re-rendered, replaced or screened because of
 The unattended lifecycle follows Phase 3F/3G: tmux, preflight then full, independent verify,
 checksummed backup, e-mail, idle check, Pause. Resume stays manual.
 
-## Planned Files (not yet written)
+## Files
 
 - `scripts/phase3h_timing_materials.py`: schedule specs, rendering through the generator,
   reconstruction and timing audits (CPU).
