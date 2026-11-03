@@ -22,6 +22,7 @@ FIG.mkdir(exist_ok=True)
 V3 = ROOT / "analysis/phase3e/direct_difference_20261102"
 F3 = ROOT / "analysis/phase3f/layout_controls_20261102/verified_analysis_v2/results.json"
 G3 = ROOT / "analysis/phase3g/alllayer_20261102/layerwise_v1/summary.json"
+H0 = ROOT / "analysis/phase3g/alllayer_20261102/h_null_v1/summary.json"
 
 SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 BLUE, ORANGE, AQUA, GRAY = "#2a78d6", "#eb6834", "#1baf7a", "#c3c2b7"
@@ -141,7 +142,7 @@ def v3_section():
     for ax in axes:
         ax.set_xticks(list(xs), [f"L{l}" for l in layers])
         ax.legend(frameon=False, fontsize=9)
-    fig.suptitle("Temporal enlarges D at every layer; direction alignment is not better", x=.02, ha="left", fontsize=12)
+    fig.suptitle("Temporal enlarges D at every layer; its cosine with the probe direction is not higher", x=.02, ha="left", fontsize=12)
     save(fig, "figB_directD_norm_vs_alignment.png")
 
     # Figure C: behaviour decomposition
@@ -294,30 +295,35 @@ def g3_section():
     xs = [int(l) for l in layers]
     NUMBERS["phase3G_layers"] = len(layers)
     get = lambda l, cell, cond, metric: S[l]["cells"][cell][cond][metric]
+    # Hue family = training source; shade, line style and marker = test condition (four distinct lines).
     styles = {("low_only", "low_boundary"): (BLUE, "-", "o", "Low-trained → test Low"),
-              ("low_only", "temporal_boundary"): (BLUE, "--", "o", "Low-trained → test Temporal"),
-              ("temporal_only", "low_boundary"): (ORANGE, "--", "s", "Temporal-trained → test Low"),
-              ("temporal_only", "temporal_boundary"): (ORANGE, "-", "s", "Temporal-trained → test Temporal")}
+              ("low_only", "temporal_boundary"): ("#0e3f7e", "--", "^", "Low-trained → test Temporal"),
+              ("temporal_only", "low_boundary"): (ORANGE, "-", "s", "Temporal-trained → test Low"),
+              ("temporal_only", "temporal_boundary"): ("#8f3410", "--", "D", "Temporal-trained → test Temporal")}
     panels = [("D", "accuracy", "Direct-D pairwise accuracy"), ("D", "single_video_auc", "Direct-D probe, single-video AUC"),
               ("h", "accuracy", "Single-video h-probe accuracy"), ("h", "single_video_auc", "Single-video h-probe AUC")]
     fig, axes = plt.subplots(2, 2, figsize=(13, 8.4), sharex=True)
     for ax, (kind, metric, title) in zip(axes.flat, panels):
         for (regime, cond), (color, ls, marker, name) in styles.items():
-            ax.plot(xs, [get(l, f"{kind}:{regime}", cond, metric) for l in layers], ls, color=color, lw=1.8,
-                    marker=marker, ms=3.5, label=name)
+            ax.plot(xs, [get(l, f"{kind}:{regime}", cond, metric) for l in layers], ls, color=color, lw=1.6,
+                    marker=marker, ms=4.5, mfc=color if ls == "-" else SURFACE, mew=1.3, label=name)
         ax.axhline(.5, color=INK2, lw=1, ls=":")
-        if kind == "h":
-            null = np.mean([get(str(l), f"h:{r}", c, metric) for l in range(11) for r in ("low_only", "temporal_only")
-                            for c in ("low_boundary", "temporal_boundary")])
-            ax.axhline(null, color=INK2, lw=1, ls="--")
-            ax.text(35, null+.012, f"empirical null L0–L10 ({null:.2f})", ha="right", fontsize=8.5, color=INK2)
+        if kind == "h" and metric == "accuracy" and H0.exists():
+            # Fold-composition-preserving permutation null (95% upper bound over the four cells), Section 5.
+            null = json.loads(H0.read_text())["null"]
+            tested = sorted({int(k.split(":")[1][1:]) for k in null if k.startswith("within_fold:")})
+            upper = [max(null[f"within_fold:L{l}:{r}"][c]["null_q975"] for r in ("low_only", "temporal_only")
+                         for c in ("low_boundary", "temporal_boundary")) for l in tested]
+            ax.plot(tested, upper, "_", color=INK, ms=9, mew=2)
+            ax.text(-.5, max(upper)+.045, "▬ within-fold permutation null, 97.5% (Figure K)",
+                    fontsize=8, color=INK, ha="left")
         for marked in (16, 17, 18, 20):
             ax.axvline(marked, color=GRID, lw=1)
         ax.set_title(title, fontsize=10.5)
         ax.set_ylim(.2 if kind == "h" else .3, 1.02)
     for ax in axes[1]:
         ax.set_xlabel("Decoder block (zero-based)")
-    axes[0][0].legend(fontsize=8.5, frameon=False, loc="lower right")
+    axes[0][0].legend(fontsize=8.5, frameon=False, loc="lower right", handlelength=3.2, markerscale=1.3)
     fig.suptitle("Layerwise 2×2: training condition × test condition (50 bases, held-out folds)", x=.02, ha="left", fontsize=12)
     save(fig, "figH_3G_layerwise_2x2.png")
 
@@ -359,14 +365,50 @@ def g3_section():
     axes[0].legend(fontsize=9, frameon=False)
     for ax in axes:
         ax.set_xlabel("Decoder block (zero-based)")
-    fig.suptitle("Temporal raises the probe margin at every informative layer; per-unit alignment is not higher (ratio 0.73–1.03)",
+    fig.suptitle("Temporal raises the probe margin at every informative layer; margin per unit ||D|| is not higher (ratio 0.73–1.03)",
                  x=.02, ha="left", fontsize=12)
     save(fig, "figJ_3G_probe_margin_by_layer.png")
+
+
+def h_null_section():
+    if not H0.exists():
+        print("h-probe null summary not found; skipping")
+        return
+    H = json.loads(H0.read_text())
+    NUMBERS["h_null"] = {k: {c: {m: v[m] for m in ("observed", "null_mean", "null_q975", "p_upper")}
+                             for c, v in cells.items()} for k, cells in H["null"].items()}
+    NUMBERS["h_null_controls"] = {k: {"observed_low": v["accuracy"]["low_boundary"],
+                                      **{n: v[f"{n}_null_low"]["null_mean"] for n in ("within_fold", "free")}}
+                                  for k, v in H["controls"].items()}
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.6), sharey=True)
+    cells = (("low_only", "low_boundary", BLUE, "o", "Low-trained → Low"),
+             ("low_only", "temporal_boundary", BLUE, "^", "Low-trained → Temporal"),
+             ("temporal_only", "low_boundary", ORANGE, "s", "Temporal-trained → Low"),
+             ("temporal_only", "temporal_boundary", ORANGE, "D", "Temporal-trained → Temporal"))
+    for ax, (null, title) in zip(axes, (("within_fold", "Within-fold null: each fold keeps its before/after-true mix"),
+                                         ("free", "Free null: every base flipped at random"))):
+        layers = sorted({int(k.split(":")[1][1:]) for k in H["null"] if k.startswith(null + ":")})
+        for i, l in enumerate(layers):
+            for j, (regime, cond, color, marker, name) in enumerate(cells):
+                v = H["null"][f"{null}:L{l}:{regime}"][cond]
+                x = i + (j - 1.5) * .16
+                ax.plot([x, x], [v["null_q025"], v["null_q975"]], color=GRAY, lw=5, solid_capstyle="butt")
+                ax.plot(x, v["null_mean"], "_", color=INK2, ms=9, mew=1.5)
+                ax.plot(x, v["observed"], marker, color=color, ms=6, label=name if i == 0 else None)
+        ax.axhline(.5, color=INK2, lw=1, ls=":")
+        ax.set_xticks(range(len(layers)), [f"L{l}" for l in layers])
+        ax.set_title(title, fontsize=10.5)
+    axes[0].set_ylabel("h-probe accuracy (held-out)")
+    axes[0].legend(fontsize=8.5, frameon=False, loc="upper left")
+    fig.suptitle("Single-video h-probe against permutation nulls (grey bar: 95% of 100 draws; dash: null mean; marker: observed)",
+                 x=.02, ha="left", fontsize=12)
+    save(fig, "figK_3G_h_probe_permutation_null.png")
 
 
 if __name__ == "__main__":
     v3_section()
     f3_section()
     g3_section()
+    h_null_section()
     (HERE / "key_numbers.json").write_text(json.dumps(NUMBERS, indent=1, default=float))
     print(sorted(p.name for p in FIG.iterdir()))
