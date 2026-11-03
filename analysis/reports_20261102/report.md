@@ -3,8 +3,9 @@
 Qwen3-VL-8B-Instruct, object-bound before/after matching on the frozen cohort of 50 rescue bases
 (original archived prompt: Low wrong, Temporal right). All numbers are means over the 50 bases unless
 stated; intervals are 95% case (base) bootstrap intervals. *Model margin* = correct-option minus
-incorrect-option first-token logit (> 0 means correct). *Probe evidence* is a linear-probe score and is
-never compared with model margins.
+incorrect-option first-token logit (> 0 means correct). *Probe margin* = (2y − 1)·z, the probe logit z signed toward the true label y (the functional
+margin of the classifier; > 0 means the probe is correct). It is in probe-logit units, comparable only
+within one layer and model, and never compared with model margins.
 
 ## 0. Summary
 
@@ -15,8 +16,8 @@ never compared with model margins.
    It is high because D is a two-alternative comparison of two videos that differ only in event order.
    Scored on single videos, the same probe falls to AUC 0.575 (L16), 0.616 (L17), 0.862 (L18), 0.944 (L20).
 2. **Low and Temporal use the same order direction.** Low-trained and Temporal-trained probes transfer to
-   each other. Temporal enlarges the order-reversal effect (‖D‖ about 25% larger at L16–L20; larger evidence at all 25 informative layers) but does
-   not align it better with truth (evidence per unit ‖D‖ is equal or slightly lower).
+   each other. Temporal enlarges the order-reversal effect (‖D‖ about 25% larger at L16–L20; larger probe margin at all 25 informative layers) but does
+   not align it better with truth (probe margin per unit ‖D‖ is equal or slightly lower).
 3. **The rescue failure is largely a B-letter preference.** With the letter preference cancelled by averaging
    the two A/B layouts, Low is on the correct side in 45/50 bases. The Temporal advantage splits into a
    layout-invariant part (+1.53 [1.28, 1.80]) and a reduced B preference (−0.93 [−1.19, −0.66]); the
@@ -67,7 +68,7 @@ original-order video.
 
 **Main result (mixed-matched training, archived layout).**
 
-| Layer | Low pair accuracy | Temporal pair accuracy | Low evidence | Temporal evidence | T − L evidence [95%] |
+| Layer | Low pair accuracy | Temporal pair accuracy | Low probe margin | Temporal probe margin | T − L probe margin [95%] |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | L16 | 94% | 99% | 4.569 | 5.659 | +1.090 [0.709, 1.478] |
 | L17 | 99% | 100% | 4.458 | 5.178 | +0.720 [0.408, 1.044] |
@@ -125,17 +126,17 @@ Transfer is near-complete in both directions: the two conditions share one order
 
 ### 2.3 Size versus alignment of the order effect (Figure B)
 
-Mixed-matched probe, both layouts pooled (hence slightly different evidence values from the
+Mixed-matched probe, both layouts pooled (hence slightly different probe-margin values from the
 archived-layout main table).
 
-| Layer | ‖D‖ Low → Temporal | ‖D‖/‖h‖ Low → Temporal | Evidence Low → Temporal | Evidence per unit ‖D‖ Low → Temporal |
+| Layer | ‖D‖ Low → Temporal | ‖D‖/‖h‖ Low → Temporal | Probe margin Low → Temporal | Probe margin per unit ‖D‖ Low → Temporal |
 | --- | --- | --- | --- | --- |
 | L16 | 2.58 → 3.34 | 0.039 → 0.050 | 4.41 → 5.52 | 1.745 → 1.674 |
 | L17 | 4.21 → 5.28 | 0.060 → 0.075 | 4.49 → 5.10 | 1.075 → 0.976 |
 | L18 | 9.11 → 11.64 | 0.116 → 0.148 | 2.43 → 2.95 | 0.268 → 0.252 |
 | L20 | 22.90 → 28.56 | 0.227 → 0.281 | 3.51 → 4.32 | 0.149 → 0.148 |
 
-‖D‖ is larger under Temporal in 97% of paired statements at L16. The higher Temporal evidence is a
+‖D‖ is larger under Temporal in 97% of paired statements at L16. The higher Temporal probe margin is a
 larger order-dependent change, not a better-aligned one.
 
 ![Figure B](figures/figB_directD_norm_vs_alignment.png)
@@ -323,12 +324,12 @@ Temporal-trained − Low-trained. Values with 95% base bootstrap intervals.
 
 ### 5.3 Size versus alignment across depth (Figure J)
 
-Truth-signed evidence of the mixed-matched D probe is higher under Temporal at all 25 informative layers
-(L11–L35). Evidence per unit ‖D‖, Temporal / Low, is 0.73–0.95 in L11–L14 and 0.91–1.03 in L15–L35:
+The probe margin of the mixed-matched D probe is higher under Temporal at all 25 informative layers
+(L11–L35). Probe margin per unit ‖D‖, Temporal / Low, is 0.73–0.95 in L11–L14 and 0.91–1.03 in L15–L35:
 never clearly above 1. The all-layer data therefore generalise Section 2.3: Temporal produces a larger
 order-dependent change at the option token, not a better-aligned one.
 
-![Figure J](figures/figJ_3G_evidence_by_layer.png)
+![Figure J](figures/figJ_3G_probe_margin_by_layer.png)
 
 ## 6. Integrated Interpretation
 
@@ -354,8 +355,8 @@ generality beyond this model and stimulus family. Gap and absolute timing remain
 
 **Implications for the thesis questions.** SQ3: the gap advantage is real and layout-invariant but
 smaller than the rescue-cohort archived contrast suggests (layout-invariant +1.53 on selected and +0.74
-on unselected videos), and part of its behavioural size is reduced letter bias. SQ4: the evidence now
-covers representation (where order becomes readable and how it differs by condition), access (route-
+on unselected videos), and part of its behavioural size is reduced letter bias. SQ4: the results now
+cover representation (where order becomes readable and how it differs by condition), access (route-
 specific, equal-budget knockouts) and a joint intervention linking the L16 visual state to later reads.
 Reports should quote layout-averaged effects as primary and archived-layout effects as selection-bound.
 
@@ -373,7 +374,7 @@ measurements they describe; today's controls change how some of them should be r
 | Whole-Event-2 L16 patch rescues 34/50, +1.58 (14 Oct) | Swapped layout +0.947 [0.687, 1.235]; reverse patch negative in both layouts | Confirmed as order information; about 0.32 of the archived +1.58 is letter-dependent. |
 | Cohort is 46 correct-A / 4 correct-B; findings conditional on this (5 Oct) | Both layouts measured for every intervention and for behaviour | About 60% of the rescue-cohort advantage is layout-invariant and about 40% is a reduced B preference; Low is on the correct side in 45/50 bases once the preference is cancelled. |
 | Balanced option probes: L16 50% / 53%, L18 91% / 95% (28 Oct; old T1−T2 contrast) | Direct-D on same-object order reversals: L16 94–99% pairwise; same probe single-video AUC 0.575 | Not contradictory: an order-sensitive signal is present at L16 but small relative to between-base variance; the pairwise signal appears from L11 and single-video decodability rises sharply at L18 (Sections 2 and 5). The earlier contrast-based numbers should not be placed in the same results column. |
-| Frozen L16-patch effects on downstream probe evidence (L17 +0.279, L18 +0.421, L20 +0.601; 28 Oct) | Not re-run with the direct-D probe | Still based on the earlier T1−T2 probe; treat as historical and do not combine with direct-D numbers. |
+| Frozen L16-patch effects on downstream probe scores (L17 +0.279, L18 +0.421, L20 +0.601; 28 Oct) | Not re-run with the direct-D probe | Still based on the earlier T1−T2 probe; treat as historical and do not combine with direct-D numbers. |
 | Temporal-relocation control: shifting the Low event sequence later turned one wrong answer correct without any gap (5 Oct) | Not addressed today | Remains open; absolute timing or recency could contribute to the boundary effect (see Limitations). |
 
 ## 8. Limitations
@@ -382,7 +383,7 @@ measurements they describe; today's controls change how some of them should be r
   inflated by selection. Layout averages and the unselected reversed videos are the less biased views.
 - Gap and absolute event timing are not separated: in an earlier relocation control (5 October), moving the
   Low event sequence later changed one answer from wrong to right without a gap.
-- Pairwise D accuracy saturates; single-video metrics and continuous evidence are more informative.
+- Pairwise D accuracy saturates; single-video metrics and the continuous probe margin are more informative.
 - One model, synthetic full-feature Level-5 videos, 50 bases; layers, views and statements are not
   independent cases. Bootstrap intervals are diagnostic and not multiplicity-corrected.
 - Knockout blocks option queries to listed keys only; information can reach options through other

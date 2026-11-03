@@ -131,13 +131,13 @@ def v3_section():
     ax.legend(loc="lower right", fontsize=9, frameon=False)
     save(fig, "figA_directD_pairwise_vs_single.png")
 
-    # Figure B: ||D|| and evidence per unit norm
+    # Figure B: ||D|| and probe margin per unit norm
     fig, axes = plt.subplots(1, 2, figsize=(11, 4))
     for cond, color, marker, name in (("low_boundary", BLUE, "o", "Low"), ("temporal_boundary", ORANGE, "s", "Temporal")):
         axes[0].plot(xs, [out["norms"][l][cond]["relative_norm"] for l in layers], "-"+marker, color=color, lw=2, ms=8, label=name)
         axes[1].plot(xs, [out["norms"][l][cond]["evidence_per_norm"] for l in layers], "-"+marker, color=color, lw=2, ms=8, label=name)
     axes[0].set_title("Size of the order-reversal effect: ||D|| / ||h||", fontsize=10.5)
-    axes[1].set_title("Truth-signed probe evidence per unit ||D||", fontsize=10.5)
+    axes[1].set_title("Probe margin per unit ||D||", fontsize=10.5)
     for ax in axes:
         ax.set_xticks(list(xs), [f"L{l}" for l in layers])
         ax.legend(frameon=False, fontsize=9)
@@ -354,14 +354,14 @@ def g3_section():
              get(l, "D:mixed_matched", "low_boundary", "unit_evidence") for l in late]
     axes[1].plot([int(l) for l in late], ratio, "-o", color=AQUA, ms=3.5, lw=1.8)
     axes[1].axhline(1, color=INK2, lw=1)
-    axes[0].set_title("Truth-signed evidence, mixed-matched D probe", fontsize=10.5)
-    axes[1].set_title("Evidence per unit ||D||, Temporal / Low (L11 onwards)", fontsize=10.5)
+    axes[0].set_title("Probe margin, mixed-matched D probe", fontsize=10.5)
+    axes[1].set_title("Probe margin per unit ||D||, Temporal / Low (L11 onwards)", fontsize=10.5)
     axes[0].legend(fontsize=9, frameon=False)
     for ax in axes:
         ax.set_xlabel("Decoder block (zero-based)")
-    fig.suptitle("Temporal raises evidence at every informative layer; per-unit alignment is not higher (ratio 0.73–1.03)",
+    fig.suptitle("Temporal raises the probe margin at every informative layer; per-unit alignment is not higher (ratio 0.73–1.03)",
                  x=.02, ha="left", fontsize=12)
-    save(fig, "figJ_3G_evidence_by_layer.png")
+    save(fig, "figJ_3G_probe_margin_by_layer.png")
 
 
 if __name__ == "__main__":
