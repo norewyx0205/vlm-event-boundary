@@ -15,8 +15,9 @@ within one layer and model, and never compared with model margins.
    (15–16/16 at L16 and L18), and a probe trained only on one layout transfers to the other (90–100%).
    It is high because D is a two-alternative comparison of two videos that differ only in event order.
    Scored on single videos, the same probe falls to AUC 0.575 (L16), 0.616 (L17), 0.862 (L18), 0.944 (L20).
-2. **Low and Temporal use the same order direction.** Low-trained and Temporal-trained probes transfer to
-   each other. Temporal enlarges the order-reversal effect (‖D‖ about 25% larger at L16–L20; larger probe margin at all 25 informative layers).
+2. **Low and Temporal share a transferable linear readout of order.** Low-trained and Temporal-trained
+   probes transfer to each other. This shows a shared linear readout direction, not that the two
+   conditions use identical internal order representations. Temporal enlarges the order-reversal effect (‖D‖ about 25% larger at L16–L20; larger probe margin at all 25 informative layers).
    Probe margin per unit ‖D‖ is equal or slightly lower. The increase is therefore not explained by a
    better cosine with the probe's readout direction; that is the only alignment claim made (Section 2.3).
 3. **The rescue failure is largely a B-letter preference.** With the letter preference cancelled by averaging
@@ -32,8 +33,9 @@ within one layer and model, and never compared with model margins.
 5. **Phase 3G all-layer probing (L0–L35).** The order-sensitive difference at the option token appears
    at **L11** (pairwise 0.70–0.77, chance before) and is near ceiling by L16; single-video decodability
    jumps at **L18** (D-probe AUC 0.85–0.88; h-probe accuracy 0.74–0.85) and peaks at L21–L24. A
-   structure-preserving permutation null places the h-probe above chance from L18 only (p ≤ 0.01), not
-   at L16–L17. The below-chance h scores in L0–L10 (≈ 0.33) are a wording × fold-composition artefact,
+   structure-preserving permutation null, run at representative layers (L5, L10, L16, L17, L18), first
+   establishes reliable h-probe single-video decodability at L18 among the tested layers (Monte Carlo
+   p ≤ 0.01); L16–L17 are not above it. The below-chance h scores in L0–L10 (≈ 0.33) are a wording × fold-composition artefact,
    not a chance level (Section 5.0). A test-condition gap (Temporal easier) appears from L18 and, for
    Temporal-trained probes, persists to L35 (+0.10 accuracy). Training-source effects are absent in L18–L24 and emerge only in late layers
    (L26–L35) as a small crossover: Temporal-trained probes are better on Temporal (+0.035 to +0.075) and
@@ -126,7 +128,9 @@ signal (‖D‖/‖h‖ ≈ 0.04 at L16).
 | L18 | 1.000 / 1.000 | 0.995 / 0.995 |
 | L20 | 1.000 / 0.995 | 0.990 / 0.995 |
 
-Transfer is near-complete in both directions: the two conditions share one order direction.
+Transfer is near-complete in both directions. The two conditions therefore share a transferable linear
+readout of order. Transfer alone does not show that their internal order representations are the same;
+the late-layer training-source crossover (Section 5.2) points to some condition-specific structure.
 
 ### 2.3 Size versus alignment of the order effect (Figure B)
 
@@ -316,8 +320,10 @@ Conclusions:
    wording-only probe sits exactly at its within-fold null. Under the free null they fall in the lower
    tail (p ≈ 0.04–0.06), because these real labels happen to produce a fold mix that works against a
    wording rule. "0.33" is not a chance level and is no longer used as a baseline.
-2. **h-probe single-video decodability is established from L18 only.** L16 (0.43–0.49) and L17
-   (0.47–0.56) are not distinguishable from either null. The best case is Temporal-trained → Temporal
+2. **Among the tested layers, reliable h-probe single-video decodability is first established at
+   L18.** L16 (0.43–0.49) and L17 (0.47–0.56) are not distinguishable from either null. Layers not
+   tested (L11–L15) are not formally excluded, although their observed h accuracy (0.305–0.36) is at the
+   L0–L10 level. The best case is Temporal-trained → Temporal
    at L17, p = 0.06. The earlier claim that decodability "starts at L16" is withdrawn.
 3. The null is wide (free null 95% ≈ 0.33–0.66). With 50 bases and these folds, h-probe accuracy
    differences of a few points between single cells are within design noise. Contrasts are therefore
@@ -355,7 +361,8 @@ Three depth regimes:
   relative to between-base variance.
 - **L16–L18, transition.** The D-probe's single-video AUC rises modestly at L15–L17 (0.54–0.62; no
   permutation null was run for this metric). The h-probe at L16–L17 is not above its permutation null
-  (Section 5.0). Both jump at L18 (h 0.74–0.85, p ≤ 0.01; D-probe AUC 0.85–0.88). L18 is the block at
+  (Section 5.0). Both jump at L18 (h 0.74–0.85, Monte Carlo p ≤ 0.01; D-probe AUC 0.85–0.88), the first tested layer
+  at which h-probe decodability is established. L18 is the block at
   which option→Event-2 knockout was most damaging in the original layout. Peak readability is at L21–L24 (h up to 0.97 accuracy, AUC 0.98–0.997; D-probe
   single-video AUC 0.96–0.98 at L22).
 - **L24–L35, late.** Single-video D-probe AUC declines to 0.81–0.90, h-probe stays high (0.80–0.97), and
@@ -406,8 +413,8 @@ The day's results fit a staged **availability → integration → use** account 
 advantage on this cohort:
 
 1. **Availability (L11–L16).** An order-sensitive signal appears at the option reference token from L11,
-   in both boundary conditions and with the same direction: an order-sensitive signal is linearly
-   readable in Low as well (readability, not use). Behaviourally, the layout-averaged Low margin leans
+   in both boundary conditions, with a shared, transferable linear readout: an order-sensitive signal is
+   linearly readable in Low as well (readability, not use). Behaviourally, the layout-averaged Low margin leans
    correct in 45/50 bases (Section 3, with its assumptions).
 2. **Integration (L16–L22).** The L16 Event-2 visual state is causally relevant: transplanting it moves
    the answer in both A/B layouts, and its effect depends cumulatively on option→Event-2 reads across
@@ -455,7 +462,11 @@ measurements they describe; today's controls change how some of them should be r
   Low event sequence later changed one answer from wrong to right without a gap.
 - Pairwise D accuracy saturates; single-video metrics and the continuous probe margin are more informative.
 - One model, synthetic full-feature Level-5 videos, 50 bases; layers, views and statements are not
-  independent cases. Bootstrap intervals are diagnostic and not multiplicity-corrected.
+  independent cases. Bootstrap intervals and permutation p-values are diagnostic and not
+  multiplicity-corrected across layers, cells or contrasts.
+- Permutation nulls use 100 draws per cell, so the smallest reportable Monte Carlo p is 1/101 ≈ 0.0099.
+  "p ≤ 0.01" means the observed value exceeded all draws. It is not a precise significance level.
+  The nulls were run at representative layers (L5, L10, L16, L17, L18), not at all 36.
 - Knockout blocks option queries to listed keys only; information can reach options through other
   positions. Patch × knockout is descriptive, not a mediation analysis.
 - Probe scores from different layers or training sources are not compared in absolute size.
