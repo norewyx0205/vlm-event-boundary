@@ -5,7 +5,8 @@ Implements `phase3h_timing_dissociation.md`. Behaviour only; no KO, patch or pro
 ## Code
 
 - `scripts/phase3h_timing_materials.py` (CPU): `generate` (fresh bases 1001–1050 via the rescue-pool
-  generator, default seed and settings, batches of five), `fresh` / `rescue` (materials), `cache`
+  generator, default seed and settings, batches of five, in a separate output directory; it passes
+  `--max_new_bases 1020` because the generator's default budget stops at ID 330), `fresh` / `rescue` (materials), `cache`
   (matched-encoder cache). For each base it first reconstructs the native Low and Temporal videos through its
   own render path and requires decoded-pixel equality with the existing videos. Only then does it render the
   new timing cells, each with a frame-differencing timing audit. At the native schedule the render spec is
@@ -14,8 +15,9 @@ Implements `phase3h_timing_dissociation.md`. Behaviour only; no KO, patch or pro
   `export`.
 - `scripts/run_phase3h_timing_unattended.py`: tmux lifecycle (preflight → full → export → verify, checksummed
   backup, e-mail, idle check, Pause). It is derived from Phase 3G.
-- `scripts/analyze_phase3h_timing.py` (CPU): S and b per cell, the five planned contrasts, the 2,000-draw
-  base bootstrap and the pre-specified reading rule.
+- `scripts/analyze_phase3h_timing.py` (CPU): S and b per cell, the five planned contrasts (with their
+  protocol names), the 2,000-draw base bootstrap and the pre-specified reading rule. No mechanism reading
+  is made unless Total > 0 with its interval excluding 0. G105/Total is reported only as a size comparison.
 - `tests/test_phase3h_timing.py`.
 
 ## Forwards

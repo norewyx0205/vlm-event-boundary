@@ -147,10 +147,16 @@ class AnalysisTests(unittest.TestCase):
     def test_reading_rule(self):
         gap = {"low": 0, "low_mid": 0, "low_late": 0, "temporal_early": 1.5, "temporal": 1.5}
         timing = {"low": 0, "low_mid": 0.9, "low_late": 1.5, "temporal_early": 0.9, "temporal": 1.5}
-        for effects, expected in ((gap, "gap_dominant"), (timing, "timing_dominant")):
+        null = dict.fromkeys(analysis.CELLS, 0.0)
+        null["low_late"] = 1.0
+        negative = {"low": 1.0, "low_mid": 1.0, "low_late": 0.5, "temporal_early": 0.0, "temporal": 0.0}
+        for effects, expected in ((gap, "gap_contrast_dominant"), (timing, "sequence_shift_dominant"),
+                                  (null, "no_temporal_advantage"), (negative, "temporal_disadvantage")):
             found = analysis.contrasts(analysis.per_base(result_rows("fresh", effects), "fresh"))
             self.assertAlmostEqual(found["Total"]["mean"], found["G105"]["mean"]+found["T0"]["mean"])
             self.assertEqual(analysis.reading(found), expected)
+            share = analysis.share(found)
+            self.assertEqual(share is None, expected in ("no_temporal_advantage", "temporal_disadvantage"))
 
     def test_missing_layout_is_refused(self):
         rows = [r for r in result_rows("fresh", dict.fromkeys(analysis.CELLS, 0.0)) if not (r["base_sample_id"] == 0 and

@@ -21,6 +21,9 @@ SCHEMA = "phase3h_timing_analysis_v1"
 CELLS = ("low", "low_mid", "low_late", "temporal_early", "temporal")
 CONTRASTS = {"G105": ("temporal", "low_late"), "G90": ("temporal_early", "low_mid"),
              "T0": ("low_late", "low"), "T45": ("temporal", "temporal_early"), "Total": ("temporal", "low")}
+NAMES = {"G105": "gap contrast at matched Event-2 onset (105)", "G90": "gap contrast at matched Event-2 onset (90)",
+         "T0": "sequence-shift contrast at zero gap", "T45": "sequence-shift contrast at 45-frame gap",
+         "Total": "original Temporal-Low contrast"}
 SELECTION_FREE = {"fresh": tuple(CONTRASTS), "rescue": ("G90",)}
 DRAWS, SEED = 2000, 20261103
 
@@ -72,14 +75,23 @@ def cell_summary(table, seed=SEED):
 
 
 def reading(result):
-    """Pre-specified reading rule (primary cohort)."""
+    """Pre-specified reading rule (primary cohort); a null or negative Total blocks any mechanism reading."""
     g105, g90, t0, total = (result[k] for k in ("G105", "G90", "T0", "Total"))
-    excludes = lambda c: c["ci_low"] > 0 or c["ci_high"] < 0
-    if excludes(g105) and g105["mean"] >= total["mean"]/2 and np.sign(g90["mean"]) == np.sign(g105["mean"]):
-        return "gap_dominant"
-    if excludes(t0) and not excludes(g105):
-        return "timing_dominant"
+    if total["ci_high"] < 0:
+        return "temporal_disadvantage"
+    if total["ci_low"] <= 0:
+        return "no_temporal_advantage"
+    if g105["ci_low"] > 0 and g105["mean"] >= total["mean"]/2 and g90["mean"] > 0:
+        return "gap_contrast_dominant"
+    if t0["ci_low"] > 0 and g105["ci_low"] <= 0 <= g105["ci_high"]:
+        return "sequence_shift_dominant"
     return "mixed_or_inconclusive"
+
+
+def share(result):
+    """G105 as a fraction of Total: a size comparison of two contrasts, not a causal share (path-dependent)."""
+    total = result["Total"]["mean"]
+    return result["G105"]["mean"]/total if total > 0 and result["Total"]["ci_low"] > 0 else None
 
 
 def analyze(results_path):
@@ -93,12 +105,17 @@ def analyze(results_path):
         output["cohorts"][cohort] = {"bases": len(table), "cells": cell_summary(table), "contrasts": found,
                                      "selection_free_contrasts": list(SELECTION_FREE[cohort])}
     output["primary_reading"] = reading(output["cohorts"]["fresh"]["contrasts"])
+    output["G105_relative_to_Total"] = share(output["cohorts"]["fresh"]["contrasts"])
+    output["contrast_names"] = NAMES
     return output
 
 
 def report(analysis):
     lines = ["# Phase 3H timing dissociation: results", "",
-             f"Primary reading (fresh cohort, pre-specified rule): **{analysis['primary_reading']}**", ""]
+             f"Primary reading (fresh cohort, pre-specified rule): **{analysis['primary_reading']}**", "",
+             "G105 relative to Total (size comparison of two contrasts, not a causal share): "
+             + ("n/a (no positive Total)" if analysis["G105_relative_to_Total"] is None
+                else f"{analysis['G105_relative_to_Total']:.0%}"), ""]
     for cohort, data in analysis["cohorts"].items():
         lines += [f"## {cohort} cohort ({data['bases']} bases)", "",
                   "| Cell | S [95%] | b [95%] | S > 0 | correct, A layout / B layout |", "| --- | --- | --- | --- | --- |"]
@@ -106,9 +123,9 @@ def report(analysis):
             lines.append(f"| {cell} | {v['S']['mean']:+.3f} [{v['S']['ci_low']:+.3f}, {v['S']['ci_high']:+.3f}] | "
                          f"{v['b']['mean']:+.3f} [{v['b']['ci_low']:+.3f}, {v['b']['ci_high']:+.3f}] | "
                          f"{v['S_above_zero']}/{data['bases']} | {v['correct_A_layout']} / {v['correct_B_layout']} |")
-        lines += ["", "| Contrast | Mean [95%] | Bases > 0 | Selection-free |", "| --- | --- | --- | --- |"]
+        lines += ["", "| Contrast | Name | Mean [95%] | Bases > 0 | Selection-free |", "| --- | --- | --- | --- | --- |"]
         for name, v in data["contrasts"].items():
-            lines.append(f"| {name} | {v['mean']:+.3f} [{v['ci_low']:+.3f}, {v['ci_high']:+.3f}] | {v['bases_above_zero']}/{v['n']} | "
+            lines.append(f"| {name} | {NAMES[name]} | {v['mean']:+.3f} [{v['ci_low']:+.3f}, {v['ci_high']:+.3f}] | {v['bases_above_zero']}/{v['n']} | "
                          f"{'yes' if name in data['selection_free_contrasts'] else 'no'} |")
         lines.append("")
     return "\n".join(lines)
